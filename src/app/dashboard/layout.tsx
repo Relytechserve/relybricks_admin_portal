@@ -2,6 +2,7 @@
 
  import type { ReactNode } from "react";
  import Link from "next/link";
+ import Image from "next/image";
  import { usePathname, useRouter } from "next/navigation";
  import { useCallback } from "react";
  import { createClient } from "@/lib/supabase";
@@ -29,9 +30,19 @@
      <div className="min-h-screen bg-stone-100">
        <header className="bg-white border-b border-stone-200 px-6 py-4">
          <div className="flex justify-between items-center">
-           <h1 className="text-xl font-semibold text-stone-900">
-             RelyBricks Admin
-           </h1>
+           <Link href="/dashboard" className="flex items-center gap-3">
+             <Image
+               src="/logo.png"
+               alt="RelyBricks Property Management"
+               width={120}
+               height={40}
+               priority
+               className="h-8 w-auto object-contain"
+             />
+             <span className="text-sm font-medium text-stone-600 hidden sm:inline">
+               Admin
+             </span>
+           </Link>
            <div className="flex items-center gap-4">
              <nav className="flex gap-4">
                <Link

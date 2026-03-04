@@ -77,46 +77,55 @@
          data: { user },
        } = await supabase.auth.getUser();
 
-       if (!user) {
-         router.push("/login");
-         return;
-       }
+      if (!user) {
+        setLoading(false);
+        router.push("/login");
+        return;
+      }
 
-       const { data, error } = await supabase
-         .from("customers")
-         .select(
-           [
-             "id",
-             "name",
-             "email",
-             "status",
-             "plan_type",
-            "source",
-            "segment",
-            "lifecycle_stage",
-            "payment_status",
-             "subscription_date",
-             "renewal_date",
-             "next_renewal_date",
-             "renewal_status",
-             "package_revenue",
-             "billed_amount",
-             "property_city",
-             "property_area",
-             "property_type",
-             "property_status",
-             "created_at",
-           ].join(", "),
-         );
+      const baseColumns = [
+        "id",
+        "name",
+        "email",
+        "status",
+        "plan_type",
+        "subscription_date",
+        "renewal_date",
+        "next_renewal_date",
+        "renewal_status",
+        "package_revenue",
+        "billed_amount",
+        "property_city",
+        "property_area",
+        "property_type",
+        "property_status",
+        "created_at",
+      ];
+      const optionalColumns = ["source", "segment", "lifecycle_stage", "payment_status"];
+      const allColumns = [...baseColumns, ...optionalColumns];
 
-       if (error) {
-         setError("Failed to load customers.");
-         setLoading(false);
-         return;
-       }
+      let data: CustomerRow[] | null = null;
 
-       setCustomers((data ?? []) as CustomerRow[]);
-       setLoading(false);
+      const { data: fullData, error: fullError } = await supabase
+        .from("customers")
+        .select(allColumns.join(", "));
+
+      if (fullError) {
+        const { data: fallbackData, error: fallbackError } = await supabase
+          .from("customers")
+          .select(baseColumns.join(", "));
+        if (fallbackError) {
+          setError("Failed to load customers.");
+          setLoading(false);
+          return;
+        }
+        data = (fallbackData ?? []) as unknown as CustomerRow[];
+      } else {
+        data = (fullData ?? []) as unknown as CustomerRow[];
+      }
+
+      setCustomers(data ?? []);
+      setLoading(false);
      }
 
      load();
@@ -214,31 +223,27 @@
      });
    }, [customers, filters]);
 
-   return (
-     <div>
-       <div className="flex items-baseline justify-between gap-4">
-         <div>
-           <h2 className="text-lg font-semibold text-stone-900">Customers</h2>
-           <p className="mt-1 text-stone-600">
-             Slice and segment your customer base by status, plan, dates, location and
-             payments.
-           </p>
-         </div>
-         {!loading && !error && customers.length > 0 && (
-           <p className="text-sm text-stone-500">
-             Showing{" "}
-             <span className="font-medium text-stone-900">
-               {filteredCustomers.length}
-             </span>{" "}
-             of{" "}
-             <span className="font-medium text-stone-900">{customers.length}</span>{" "}
-             customers
-           </p>
-         )}
-       </div>
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-4 flex-wrap">
+        <h2 className="text-lg font-semibold text-stone-900">Customers</h2>
+        {!loading && !error && customers.length > 0 && (
+          <p className="text-sm text-stone-500">
+            Showing{" "}
+            <span className="font-medium text-stone-900">
+              {filteredCustomers.length}
+            </span>{" "}
+            of{" "}
+            <span className="font-medium text-stone-900">{customers.length}</span>{" "}
+            customers
+          </p>
+        )}
+      </div>
 
-       {!loading && !error && customers.length > 0 && (
-         <div className="mt-6 bg-white rounded-xl border border-stone-200 p-4">
+      {/* Filters: always visible so layout is stable */}
+      <div
+        className={`mt-6 bg-white rounded-xl border border-stone-200 p-4 ${loading ? "opacity-60 pointer-events-none" : ""}`}
+      >
            <div className="grid gap-3 md:grid-cols-4 lg:grid-cols-6">
              <div className="md:col-span-2">
                <label className="block text-xs font-medium text-stone-600 mb-1">
@@ -427,10 +432,13 @@
                </div>
              </div>
            </div>
-         </div>
-       )}
+      </div>
 
-       {loading && <p className="mt-6 text-stone-500">Loading...</p>}
+      {loading && (
+        <p className="mt-6 text-stone-500" aria-live="polite">
+          Loading customers…
+        </p>
+      )}
        {!loading && error && (
          <div className="mt-6 p-3 rounded-lg bg-red-50 border border-red-200 text-red-700 text-sm">
            {error}

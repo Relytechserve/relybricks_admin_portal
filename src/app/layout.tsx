@@ -4,6 +4,9 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "RelyBricks Admin",
   description: "Property management admin portal",
+  icons: {
+    icon: "/logo.png",
+  },
 };
 
 export default function RootLayout({
