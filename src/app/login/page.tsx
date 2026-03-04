@@ -19,20 +19,30 @@ export default function AdminLoginPage() {
     const email = formData.get("email") as string;
     const password = formData.get("password") as string;
 
-    const supabase = createClient();
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
+    try {
+      const supabase = createClient();
+      const timeoutMs = 15000;
+      const signInPromise = supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+      const timeoutPromise = new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Request timed out. Check your connection and try again.")), timeoutMs)
+      );
+      const { error: signInError } = await Promise.race([signInPromise, timeoutPromise]);
 
-    setLoading(false);
+      if (signInError) {
+        setError(signInError.message);
+        return;
+      }
 
-    if (signInError) {
-      setError(signInError.message);
-      return;
+      router.refresh();
+      router.push("/dashboard");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sign in failed.");
+    } finally {
+      setLoading(false);
     }
-
-    router.push("/dashboard");
   }
 
   return (
