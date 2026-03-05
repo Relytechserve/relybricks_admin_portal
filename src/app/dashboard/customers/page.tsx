@@ -535,12 +535,13 @@ type SortKey =
        {!loading && !error && customers.length === 0 && (
          <p className="mt-6 text-stone-500">No customers found.</p>
        )}
-       {!loading && !error && customers.length > 0 && (
-         <div className="mt-4 bg-white rounded-xl border border-stone-200 overflow-hidden">
-           <table className="w-full text-left">
+      {!loading && !error && customers.length > 0 && (
+        <div className="mt-4 bg-white rounded-xl border border-stone-200 overflow-hidden">
+          <div className="w-full overflow-x-auto">
+          <table className="min-w-[640px] text-left text-xs sm:text-sm">
              <thead className="bg-stone-50 border-b border-stone-200">
                <tr>
-                <th className="px-4 py-3 font-medium text-stone-900">
+                <th className="px-3 py-2 font-medium text-stone-900">
                   <button
                     type="button"
                     onClick={() => handleSort("name")}
@@ -550,7 +551,7 @@ type SortKey =
                     {renderSortIndicator("name")}
                   </button>
                 </th>
-                <th className="px-4 py-3 font-medium text-stone-900">
+                <th className="px-3 py-2 font-medium text-stone-900">
                   <button
                     type="button"
                     onClick={() => handleSort("email")}
@@ -560,7 +561,7 @@ type SortKey =
                     {renderSortIndicator("email")}
                   </button>
                 </th>
-                <th className="px-4 py-3 font-medium text-stone-900">
+                <th className="px-3 py-2 font-medium text-stone-900">
                   <button
                     type="button"
                     onClick={() => handleSort("status")}
@@ -570,7 +571,7 @@ type SortKey =
                     {renderSortIndicator("status")}
                   </button>
                 </th>
-                <th className="px-4 py-3 font-medium text-stone-900">
+                <th className="px-3 py-2 font-medium text-stone-900">
                   <button
                     type="button"
                     onClick={() => handleSort("plan")}
@@ -580,7 +581,7 @@ type SortKey =
                     {renderSortIndicator("plan")}
                   </button>
                 </th>
-                <th className="px-4 py-3 font-medium text-stone-900">
+                <th className="px-3 py-2 font-medium text-stone-900">
                   <button
                     type="button"
                     onClick={() => handleSort("registration")}
@@ -590,7 +591,7 @@ type SortKey =
                     {renderSortIndicator("registration")}
                   </button>
                 </th>
-                <th className="px-4 py-3 font-medium text-stone-900">
+                <th className="px-3 py-2 font-medium text-stone-900">
                   <button
                     type="button"
                     onClick={() => handleSort("nextRenewal")}
@@ -600,7 +601,7 @@ type SortKey =
                     {renderSortIndicator("nextRenewal")}
                   </button>
                 </th>
-                <th className="px-4 py-3 font-medium text-stone-900">
+                <th className="px-3 py-2 font-medium text-stone-900">
                   <button
                     type="button"
                     onClick={() => handleSort("payment")}
@@ -631,7 +632,7 @@ type SortKey =
                        )
                      }
                    >
-                     <td className="px-4 py-3">
+                     <td className="px-3 py-2">
                        <Link
                          href={`/dashboard/customers/${encodeURIComponent(c.id)}`}
                          className="text-blue-600 hover:underline"
@@ -640,15 +641,15 @@ type SortKey =
                          {c.name}
                        </Link>
                      </td>
-                     <td className="px-4 py-3 text-sm text-stone-700">
+                     <td className="px-3 py-2 text-sm text-stone-700">
                        {c.email}
                      </td>
-                     <td className="px-4 py-3">
+                     <td className="px-3 py-2">
                        <span className="inline-flex items-center rounded-full border border-stone-200 bg-stone-50 px-2.5 py-0.5 text-xs font-medium text-stone-700">
                          {c.status}
                        </span>
                      </td>
-                     <td className="px-4 py-3 text-sm text-stone-700">
+                     <td className="px-3 py-2 text-sm text-stone-700">
                        <div className="flex flex-col gap-0.5">
                          <span>{c.plan_type ?? "—"}</span>
                          <span className="text-xs text-stone-500">
@@ -656,13 +657,13 @@ type SortKey =
                          </span>
                        </div>
                      </td>
-                     <td className="px-4 py-3 text-sm text-stone-700">
+                     <td className="px-3 py-2 text-sm text-stone-700">
                        {registrationDate || "—"}
                      </td>
                      <td className="px-4 py-3 text-sm text-stone-700">
                        {nextRenewalDate || "—"}
                      </td>
-                     <td className="px-4 py-3">
+                     <td className="px-3 py-2">
                        <span
                          className={
                            paymentStatus === "paid"
@@ -677,7 +678,8 @@ type SortKey =
                  );
                })}
              </tbody>
-           </table>
+          </table>
+          </div>
          </div>
        )}
      </div>

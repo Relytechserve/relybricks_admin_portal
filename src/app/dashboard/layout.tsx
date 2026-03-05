@@ -48,6 +48,8 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [user, setUser] = useState<User | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   const isDashboard = pathname === "/dashboard";
   const isCustomers =
@@ -81,31 +83,95 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
 
   return (
     <div className="min-h-screen bg-stone-100 flex flex-col md:flex-row">
-      <aside className="hidden md:flex w-56 shrink-0 bg-stone-200/80 border-r border-stone-200 flex-col">
-        <div className="p-4 border-b border-stone-200">
+      {/* Mobile sidebar overlay */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-40 flex md:hidden">
+          <div className="w-56 bg-white border-r border-stone-200 flex flex-col shadow-lg">
+            <div className="p-4 border-b border-stone-200 flex items-center justify-between">
+              <Link href="/dashboard" className="flex items-center gap-2">
+                <Image
+                  src="/logo.png"
+                  alt="RelyBricks"
+                  width={132}
+                  height={40}
+                  className="h-8 w-auto object-contain"
+                />
+              </Link>
+              <button
+                type="button"
+                onClick={() => setSidebarOpen(false)}
+                className="text-stone-600 text-xs"
+              >
+                Close
+              </button>
+            </div>
+            <nav className="p-3 flex flex-col gap-0.5">
+              {navItems.map((item) => (
+                <Link
+                  key={item.href + item.label}
+                  href={item.href}
+                  onClick={() => setSidebarOpen(false)}
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                    item.active
+                      ? "bg-violet-600 text-white"
+                      : "text-stone-700 hover:bg-stone-300/60"
+                  }`}
+                >
+                  <SidebarIcon name={item.icon} />
+                  {item.label}
+                </Link>
+              ))}
+            </nav>
+          </div>
+          <button
+            type="button"
+            aria-label="Close sidebar overlay"
+            className="flex-1 bg-black/20"
+            onClick={() => setSidebarOpen(false)}
+          />
+        </div>
+      )}
+
+      {/* Desktop sidebar */}
+      <aside
+        className={`hidden md:flex ${
+          sidebarCollapsed ? "w-16" : "w-56"
+        } shrink-0 bg-white border-r border-stone-200 flex-col`}
+      >
+        <div className="p-4 border-b border-stone-200 flex items-center justify-between gap-2">
           <Link href="/dashboard" className="flex items-center gap-2">
             <Image
               src="/logo.png"
               alt="RelyBricks"
-              width={100}
-              height={32}
-              className="h-7 w-auto object-contain"
+              width={sidebarCollapsed ? 40 : 140}
+              height={44}
+              className={sidebarCollapsed ? "h-8 w-auto object-contain" : "h-9 w-auto object-contain"}
             />
           </Link>
+          <button
+            type="button"
+            aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+            className="hidden md:inline-flex items-center justify-center rounded-md border border-stone-200 bg-white px-1.5 py-1 text-[10px] text-stone-500 hover:bg-stone-50"
+            onClick={() => setSidebarCollapsed((prev) => !prev)}
+          >
+            {sidebarCollapsed ? "»" : "«"}
+          </button>
         </div>
         <nav className="p-3 flex flex-col gap-0.5">
           {navItems.map((item) => (
             <Link
               key={item.href + item.label}
               href={item.href}
-              className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+              className={`flex items-center ${
+                sidebarCollapsed ? "justify-center" : "gap-3"
+              } px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
                 item.active
-                  ? "bg-violet-600 text-white"
-                  : "text-stone-700 hover:bg-stone-300/60"
+                    ? "bg-violet-600 text-white shadow-sm"
+                    : "text-stone-600 hover:bg-violet-50"
               }`}
             >
               <SidebarIcon name={item.icon} />
-              {item.label}
+              {!sidebarCollapsed && item.label}
             </Link>
           ))}
         </nav>
@@ -114,10 +180,25 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="bg-white border-b border-stone-200 px-6 py-3 flex items-center justify-between shrink-0">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded bg-stone-100 flex items-center justify-center">
-              <span className="text-stone-500 text-xs font-medium">RB</span>
-            </div>
-            <span className="font-semibold text-stone-900">RelyBricks Admin</span>
+            <button
+              type="button"
+              className="md:hidden mr-1 text-stone-600"
+              aria-label="Open navigation"
+              onClick={() => setSidebarOpen(true)}
+            >
+              <span className="block w-4 border-b border-current mb-0.5" />
+              <span className="block w-4 border-b border-current mb-0.5" />
+              <span className="block w-4 border-b border-current" />
+            </button>
+            <Link href="/dashboard" className="flex items-center gap-2">
+              <Image
+                src="/logo.png"
+                alt="RelyBricks"
+                width={120}
+                height={36}
+                className="h-8 w-auto object-contain"
+              />
+            </Link>
             <nav className="ml-4 flex gap-3 md:hidden text-xs font-medium text-stone-600">
               <Link
                 href="/dashboard"
