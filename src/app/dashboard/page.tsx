@@ -20,6 +20,7 @@ type CustomerSummary = {
   plan_type: string | null;
   next_renewal_date: string | null;
   package_revenue: number | null;
+  subscription_date?: string | null;
   lifecycle_stage: string | null;
   payment_status: string | null;
   outstanding_amount: number | null;
@@ -36,7 +37,8 @@ type DashboardStats = {
   totalProperties: number;
 };
 
-type MonthData = { month: string; label: string; count: number };
+type MonthCustomer = { id: string; name: string; amount: number };
+type MonthData = { month: string; label: string; revenue: number; customers: MonthCustomer[] };
 type RecentActivity = { id: string; name: string; created_at: string };
 
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -81,7 +83,7 @@ export default function AdminDashboardPage() {
       const { data: customers, error: custError } = (await supabase
         .from("customers")
         .select(
-          "id, status, plan_type, next_renewal_date, package_revenue, lifecycle_stage, payment_status, outstanding_amount, created_at, name",
+          "id, status, plan_type, subscription_date, next_renewal_date, package_revenue, lifecycle_stage, payment_status, outstanding_amount, created_at, name",
         )) as { data: (CustomerSummary & { id?: string; name?: string })[] | null; error: PostgrestError | null };
 
       if (custError) {
@@ -125,19 +127,40 @@ export default function AdminDashboardPage() {
         totalProperties,
       });
 
+      // Revenue insights: cash-based view – when subscription payments are received
       const byMonth: Record<number, number> = {};
-      for (let m = 1; m <= 12; m++) byMonth[m] = 0;
+      const byMonthCustomers: Record<number, MonthCustomer[]> = {};
+      for (let m = 1; m <= 12; m++) {
+        byMonth[m] = 0;
+        byMonthCustomers[m] = [];
+      }
       list.forEach((c) => {
-        const created = c.created_at;
-        if (!created) return;
-        const d = new Date(created);
-        if (d.getFullYear() !== currentYear) return;
-        byMonth[d.getMonth() + 1]++;
+        if (!c.package_revenue || !c.id || !c.name) return;
+        const amount = c.package_revenue;
+
+        if (c.subscription_date) {
+          const start = new Date(c.subscription_date);
+          if (!Number.isNaN(start.getTime()) && start.getFullYear() === currentYear) {
+            const key = start.getMonth() + 1;
+            byMonth[key] += amount;
+            byMonthCustomers[key].push({ id: c.id, name: c.name, amount });
+          }
+        }
+
+        if (c.next_renewal_date) {
+          const renewal = new Date(c.next_renewal_date);
+          if (!Number.isNaN(renewal.getTime()) && renewal.getFullYear() === currentYear) {
+            const key = renewal.getMonth() + 1;
+            byMonth[key] += amount;
+            byMonthCustomers[key].push({ id: c.id, name: c.name, amount });
+          }
+        }
       });
       const chart: MonthData[] = MONTH_LABELS.map((label, i) => ({
         month: String(i + 1),
         label,
-        count: byMonth[i + 1] ?? 0,
+        revenue: byMonth[i + 1] ?? 0,
+        customers: byMonthCustomers[i + 1] ?? [],
       }));
       setChartData(chart);
 
@@ -242,19 +265,45 @@ export default function AdminDashboardPage() {
 
       <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-white rounded-xl border border-stone-200 p-4">
-          <h2 className="text-base font-semibold text-stone-900">Performance Analytics</h2>
-          <p className="text-sm text-stone-500 mt-0.5">New customers by month — {new Date().getFullYear()}</p>
+          <h2 className="text-base font-semibold text-stone-900">Revenue insights</h2>
+          <p className="text-sm text-stone-500 mt-0.5">
+            Subscription cash inflow by month — {new Date().getFullYear()}
+          </p>
           <div className="mt-4 h-64">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" vertical={false} />
                 <XAxis dataKey="label" tick={{ fontSize: 12 }} stroke="#a8a29e" />
-                <YAxis tick={{ fontSize: 12 }} stroke="#a8a29e" allowDecimals={false} />
+                <YAxis
+                  tick={{ fontSize: 12 }}
+                  stroke="#a8a29e"
+                  allowDecimals={false}
+                  tickFormatter={(v: number) =>
+                    `₹${Math.round(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+                  }
+                />
                 <Tooltip
-                  formatter={(value: number | undefined) => [value ?? 0, "New customers"]}
+                  formatter={(
+                    value: number | undefined,
+                    _name: string | undefined,
+                    item: unknown,
+                  ) => {
+                    const payload = (item as { payload?: MonthData })?.payload;
+                    const names =
+                      payload && payload.customers.length > 0
+                        ? payload.customers.map((c) => c.name).join(", ")
+                        : "No customers";
+                    const label = `Revenue (${names})`;
+                    return [
+                      `₹${Math.round(value ?? 0).toLocaleString("en-IN", {
+                        maximumFractionDigits: 0,
+                      })}`,
+                      label,
+                    ];
+                  }}
                   labelFormatter={(_, payload) => (payload?.[0]?.payload as MonthData | undefined)?.label ?? ""}
                 />
-                <Bar dataKey="count" fill="#14b8a6" radius={[4, 4, 0, 0]} name="Customers" />
+                <Bar dataKey="revenue" fill="#14b8a6" radius={[4, 4, 0, 0]} name="Revenue" />
               </BarChart>
             </ResponsiveContainer>
           </div>

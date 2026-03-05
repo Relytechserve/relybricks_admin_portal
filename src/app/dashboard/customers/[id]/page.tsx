@@ -243,6 +243,20 @@
      [form?.outstanding_amount],
    );
 
+  function computeLifecycleStage(value: Customer): string | null {
+    const status = value.status;
+    const paymentStatus = value.payment_status;
+    const outstanding = value.outstanding_amount ?? 0;
+
+    if (status === "Active") return "live";
+    if (status === "Prospect") return "lead";
+    if (status === "Inactive") {
+      if (paymentStatus === "overdue" || outstanding > 0) return "churn_risk";
+      return "churned";
+    }
+    return value.lifecycle_stage ?? null;
+  }
+
    function updateField<K extends keyof Customer>(
      key: K,
      value: Customer[K],
@@ -258,6 +272,8 @@
      setSaveError(null);
      setSaveSuccess(false);
 
+    const lifecycleStage = computeLifecycleStage(form);
+
      const supabase = createClient();
 
      const { error: updateError } = await supabase
@@ -272,7 +288,7 @@
          plan_type: form.plan_type,
          source: form.source,
          segment: form.segment,
-         lifecycle_stage: form.lifecycle_stage,
+         lifecycle_stage: lifecycleStage,
          subscription_date: form.subscription_date,
          next_renewal_date: form.next_renewal_date,
          renewal_status: form.renewal_status,
@@ -295,13 +311,13 @@
        })
        .eq("id", customer.id);
 
-     if (updateError) {
+    if (updateError) {
        setSaveError("Failed to save changes.");
        setSaving(false);
        return;
      }
 
-     setCustomer(form);
+    setCustomer({ ...form, lifecycle_stage: lifecycleStage });
      setSaving(false);
      setSaveSuccess(true);
    }
