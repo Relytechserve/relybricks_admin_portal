@@ -80,8 +80,8 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   ] as const;
 
   return (
-    <div className="min-h-screen bg-stone-100 flex">
-      <aside className="w-56 shrink-0 bg-stone-200/80 border-r border-stone-200 flex flex-col">
+    <div className="min-h-screen bg-stone-100 flex flex-col md:flex-row">
+      <aside className="hidden md:flex w-56 shrink-0 bg-stone-200/80 border-r border-stone-200 flex-col">
         <div className="p-4 border-b border-stone-200">
           <Link href="/dashboard" className="flex items-center gap-2">
             <Image
@@ -118,6 +118,28 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
               <span className="text-stone-500 text-xs font-medium">RB</span>
             </div>
             <span className="font-semibold text-stone-900">RelyBricks Admin</span>
+            <nav className="ml-4 flex gap-3 md:hidden text-xs font-medium text-stone-600">
+              <Link
+                href="/dashboard"
+                className={
+                  isDashboard
+                    ? "text-violet-700"
+                    : "hover:text-stone-900"
+                }
+              >
+                Insight
+              </Link>
+              <Link
+                href="/dashboard/customers"
+                className={
+                  isCustomers
+                    ? "text-violet-700"
+                    : "hover:text-stone-900"
+                }
+              >
+                Customers
+              </Link>
+            </nav>
           </div>
           <div className="flex items-center gap-3">
             <span className="text-sm text-stone-600 hidden sm:inline">{displayName}</span>
