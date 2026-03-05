@@ -17,6 +17,7 @@
    preferred_contact: string | null;
    status: string;
    plan_type: string | null;
+  subscription_tier_id?: string | null;
    next_renewal_date: string | null;
    renewal_status: string | null;
    subscription_date: string | null;
@@ -71,6 +72,23 @@ type CustomerNote = {
   created_at: string | null;
 };
 
+type SubscriptionTier = {
+  id: string;
+  name: string;
+  description: string | null;
+  is_custom: boolean;
+  is_active: boolean;
+};
+
+type SubscriptionTierPrice = {
+  id: string;
+  tier_id: string;
+  city: string;
+  amount: number;
+  currency: string | null;
+  is_active: boolean;
+};
+
  function formatDate(value: string | null) {
    if (!value) return null;
    const date = new Date(value);
@@ -112,6 +130,8 @@ type CustomerNote = {
   const [newNoteBody, setNewNoteBody] = useState("");
   const [newNoteCustomerVisible, setNewNoteCustomerVisible] = useState(false);
   const [savingNote, setSavingNote] = useState(false);
+  const [tiers, setTiers] = useState<SubscriptionTier[]>([]);
+  const [tierPrices, setTierPrices] = useState<SubscriptionTierPrice[]>([]);
 
    const id = params?.id;
 
@@ -136,7 +156,7 @@ type CustomerNote = {
          return;
        }
 
-       const { data, error } = await supabase
+      const { data, error } = await supabase
          .from("customers")
          .select(
            [
@@ -151,6 +171,7 @@ type CustomerNote = {
              "preferred_contact",
              "status",
              "plan_type",
+            "subscription_tier_id",
              "next_renewal_date",
              "renewal_status",
              "subscription_date",
@@ -225,6 +246,25 @@ type CustomerNote = {
         }
       }
 
+      const { data: tiersData } = await supabase
+        .from("subscription_tiers")
+        .select("id, name, description, is_custom, is_active")
+        .order("name", { ascending: true });
+      if (tiersData) {
+        const tierList = tiersData as unknown as SubscriptionTier[];
+        setTiers(tierList);
+        const tierIds = tierList.map((t) => t.id);
+        if (tierIds.length > 0) {
+          const { data: pricesData } = await supabase
+            .from("subscription_tier_prices")
+            .select("id, tier_id, city, amount, currency, is_active")
+            .in("tier_id", tierIds);
+          if (pricesData) {
+            setTierPrices(pricesData as unknown as SubscriptionTierPrice[]);
+          }
+        }
+      }
+
       const { data: notesData } = await supabase
         .from("customer_notes")
         .select("id, customer_id, body, is_customer_visible, author_email, created_at")
@@ -265,6 +305,30 @@ type CustomerNote = {
      [form?.outstanding_amount],
    );
 
+  const activeTiers = useMemo(
+    () => tiers.filter((t) => t.is_active || t.id === form?.subscription_tier_id),
+    [tiers, form?.subscription_tier_id],
+  );
+
+  function findTierPriceForCustomer(
+    tierId: string | null | undefined,
+    city: string | null | undefined,
+  ): SubscriptionTierPrice | null {
+    if (!tierId) return null;
+    const cityName = (city ?? "").trim();
+    if (cityName) {
+      const match = tierPrices.find(
+        (p) =>
+          p.tier_id === tierId &&
+          p.is_active &&
+          p.city.toLowerCase() === cityName.toLowerCase(),
+      );
+      if (match) return match;
+    }
+    const anyPrice = tierPrices.find((p) => p.tier_id === tierId && p.is_active);
+    return anyPrice ?? null;
+  }
+
   function computeLifecycleStage(value: Customer): string | null {
     const status = value.status;
     const paymentStatus = value.payment_status;
@@ -296,6 +360,20 @@ type CustomerNote = {
 
     const lifecycleStage = computeLifecycleStage(form);
 
+    if (form.subscription_tier_id && !tiers.length) {
+      setSaveError("Subscription tiers are still loading. Please try again.");
+      setSaving(false);
+      return;
+    }
+
+    if (form.subscription_tier_id && !findTierPriceForCustomer(form.subscription_tier_id, form.property_city)) {
+      setSaveError(
+        "Selected subscription tier does not have a price for this customer's city. Please add a city price or use a custom tier.",
+      );
+      setSaving(false);
+      return;
+    }
+
      const supabase = createClient();
 
      const { error: updateError } = await supabase
@@ -308,6 +386,7 @@ type CustomerNote = {
          preferred_contact: form.preferred_contact,
          status: form.status,
          plan_type: form.plan_type,
+         subscription_tier_id: form.subscription_tier_id ?? null,
          source: form.source,
          segment: form.segment,
          lifecycle_stage: lifecycleStage,
@@ -967,27 +1046,70 @@ type CustomerNote = {
                  )}
                </div>
              </div>
-             <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
-               <div>
-                 <p className="text-sm text-stone-500">Annual package revenue</p>
-                 <p className="mt-1 text-base font-semibold text-stone-900">
-                   {formattedPackageRevenue ?? "Not set"}
-                 </p>
-                 <input
-                   type="number"
-                   min={0}
-                   value={form.package_revenue ?? ""}
-                   onChange={(event) =>
-                     updateField(
-                       "package_revenue",
-                       event.target.value === ""
-                         ? null
-                         : Number(event.target.value),
-                     )
-                   }
-                   className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 />
-               </div>
+            <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
+              <div>
+                <p className="text-sm text-stone-500">Subscription tier</p>
+                <select
+                  value={form.subscription_tier_id ?? ""}
+                  onChange={(event) => {
+                    const value = event.target.value || null;
+                    const tier = activeTiers.find((t) => t.id === value) || null;
+                    const updated: Customer = {
+                      ...form,
+                      subscription_tier_id: value,
+                      plan_type: tier ? tier.name : form.plan_type,
+                    };
+                    const price = tier
+                      ? findTierPriceForCustomer(tier.id, form.property_city)
+                      : null;
+                    if (price) {
+                      updated.package_revenue = Number(price.amount);
+                    }
+                    setForm(updated);
+                    setSaveSuccess(false);
+                    setSaveError(null);
+                  }}
+                  className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">Not set</option>
+                  {activeTiers.map((tier) => (
+                    <option key={tier.id} value={tier.id}>
+                      {tier.name}
+                      {!tier.is_active ? " (inactive)" : ""}
+                    </option>
+                  ))}
+                </select>
+                {form.subscription_tier_id && (
+                  <p className="mt-1 text-xs text-stone-500">
+                    Plan: {form.plan_type ?? "Not set"}{" "}
+                    {findTierPriceForCustomer(form.subscription_tier_id, form.property_city)
+                      ? `• ₹${Number(
+                          findTierPriceForCustomer(form.subscription_tier_id, form.property_city)?.amount ?? 0,
+                        ).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+                      : "• No city price configured"}
+                  </p>
+                )}
+              </div>
+              <div>
+                <p className="text-sm text-stone-500">Annual package revenue</p>
+                <p className="mt-1 text-base font-semibold text-stone-900">
+                  {formattedPackageRevenue ?? "Not set"}
+                </p>
+                <input
+                  type="number"
+                  min={0}
+                  value={form.package_revenue ?? ""}
+                  onChange={(event) =>
+                    updateField(
+                      "package_revenue",
+                      event.target.value === ""
+                        ? null
+                        : Number(event.target.value),
+                    )
+                  }
+                  className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
                <div>
                  <p className="text-sm text-stone-500">Outstanding amount</p>
                  <p className="mt-1 text-base font-semibold text-stone-900">

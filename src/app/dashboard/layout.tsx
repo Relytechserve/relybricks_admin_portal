@@ -78,7 +78,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
     { href: "/dashboard", label: "Insight", icon: "insight", active: isDashboard },
     { href: "/dashboard/customers", label: "Customers", icon: "customers", active: isCustomers },
     { href: "/dashboard/customers", label: "Properties", icon: "properties", active: false },
-    { href: "/dashboard", label: "Subscription", icon: "subscription", active: false },
+    { href: "/dashboard/subscription", label: "Subscription", icon: "subscription", active: pathname?.startsWith("/dashboard/subscription") ?? false },
   ] as const;
 
   return (
