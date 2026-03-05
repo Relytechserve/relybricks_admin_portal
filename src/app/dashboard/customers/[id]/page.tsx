@@ -62,6 +62,15 @@
    created_at: string | null;
  };
 
+type CustomerNote = {
+  id: string;
+  customer_id: string;
+  body: string;
+  is_customer_visible: boolean;
+  author_email: string | null;
+  created_at: string | null;
+};
+
  function formatDate(value: string | null) {
    if (!value) return null;
    const date = new Date(value);
@@ -99,6 +108,10 @@
   const [documentUploadingPropertyId, setDocumentUploadingPropertyId] = useState<string | null>(null);
   const [documentMessage, setDocumentMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
   const [selectedFileByPropertyId, setSelectedFileByPropertyId] = useState<Record<string, File | null>>({});
+  const [notes, setNotes] = useState<CustomerNote[]>([]);
+  const [newNoteBody, setNewNoteBody] = useState("");
+  const [newNoteCustomerVisible, setNewNoteCustomerVisible] = useState(false);
+  const [savingNote, setSavingNote] = useState(false);
 
    const id = params?.id;
 
@@ -210,6 +223,15 @@
             setDocumentsByPropertyId(byProp);
           }
         }
+      }
+
+      const { data: notesData } = await supabase
+        .from("customer_notes")
+        .select("id, customer_id, body, is_customer_visible, author_email, created_at")
+        .eq("customer_id", id)
+        .order("created_at", { ascending: false });
+      if (notesData) {
+        setNotes(notesData as unknown as CustomerNote[]);
       }
        setLoading(false);
        setLoadingProperties(false);
@@ -438,6 +460,33 @@
      const { data } = await supabase.storage.from("property-documents").createSignedUrl(doc.storage_path, 60);
      if (data?.signedUrl) window.open(data.signedUrl, "_blank");
    }
+
+  async function handleAddNote() {
+    if (!id || !newNoteBody.trim()) return;
+    setSavingNote(true);
+    const supabase = createClient();
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    const { data, error } = await supabase
+      .from("customer_notes")
+      .insert({
+        customer_id: id,
+        body: newNoteBody.trim(),
+        is_customer_visible: newNoteCustomerVisible,
+        author_email: user?.email ?? null,
+      })
+      .select("id, customer_id, body, is_customer_visible, author_email, created_at")
+      .single();
+
+    setSavingNote(false);
+    if (error) return;
+    setNotes((prev) => [data as unknown as CustomerNote, ...prev]);
+    setNewNoteBody("");
+    setNewNoteCustomerVisible(false);
+  }
 
    return (
      <div>
@@ -1006,19 +1055,83 @@
                  </div>
                </div>
             )}
-            {form?.notes && (
-               <div className="bg-white rounded-xl border border-stone-200 p-4">
-                 <p className="text-sm text-stone-500">Internal notes</p>
-                 <textarea
-                   value={form.notes ?? ""}
-                   onChange={(event) =>
-                     updateField("notes", event.target.value || null)
-                   }
-                   rows={4}
-                   className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 />
-               </div>
-             )}
+            <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
+              <p className="text-sm font-medium text-stone-900">Notes & comments</p>
+              <p className="text-xs text-stone-500">
+                Use notes to track interactions. Tick “Customer visible” to share the note with the customer.
+              </p>
+              <div className="space-y-2">
+                <textarea
+                  value={newNoteBody}
+                  onChange={(event) => setNewNoteBody(event.target.value)}
+                  rows={3}
+                  placeholder="Add a new note..."
+                  className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <label className="inline-flex items-center gap-2 text-xs text-stone-700">
+                    <input
+                      type="checkbox"
+                      checked={newNoteCustomerVisible}
+                      onChange={(event) => setNewNoteCustomerVisible(event.target.checked)}
+                      className="h-3 w-3 rounded border-stone-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>Customer visible</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleAddNote}
+                    disabled={savingNote || !newNoteBody.trim()}
+                    className="inline-flex items-center rounded-lg bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
+                  >
+                    {savingNote ? "Saving…" : "Add note"}
+                  </button>
+                </div>
+              </div>
+              <div className="mt-2 space-y-2 max-h-64 overflow-y-auto">
+                {notes.length === 0 && (
+                  <p className="text-xs text-stone-500">No notes yet. Add the first note above.</p>
+                )}
+                {notes.map((note) => {
+                  const created = formatDate(note.created_at ?? null) ?? "";
+                  const isCustomer = note.is_customer_visible;
+                  return (
+                    <div
+                      key={note.id}
+                      className={
+                        isCustomer
+                          ? "rounded-lg border border-blue-100 bg-blue-50 px-3 py-2"
+                          : "rounded-lg border border-stone-200 bg-stone-50 px-3 py-2"
+                      }
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-600">
+                          {note.author_email && <span>{note.author_email}</span>}
+                          {created && (
+                            <>
+                              <span>•</span>
+                              <span>{created}</span>
+                            </>
+                          )}
+                        </div>
+                        <span
+                          className={
+                            isCustomer
+                              ? "inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700"
+                              : "inline-flex items-center rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-700"
+                          }
+                        >
+                          {isCustomer ? "Customer note" : "Internal"}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-stone-800 whitespace-pre-wrap">
+                        {note.body}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
            </div>
          </div>
        )}
