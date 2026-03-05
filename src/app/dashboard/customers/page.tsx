@@ -26,6 +26,7 @@
    property_type: string | null;
    property_status: string | null;
    created_at: string | null;
+  updated_at?: string | null;
  };
 
  type Filters = {
@@ -41,6 +42,16 @@
    renewalFrom: string;
    renewalTo: string;
  };
+
+type SortKey =
+  | "lastUpdated"
+  | "name"
+  | "email"
+  | "status"
+  | "plan"
+  | "registration"
+  | "nextRenewal"
+  | "payment";
 
  function getPaymentStatus(customer: CustomerRow): "paid" | "unpaid" {
    const billed = customer.billed_amount;
@@ -64,6 +75,10 @@
      renewalFrom: "",
      renewalTo: "",
    });
+  const [sort, setSort] = useState<{ key: SortKey; direction: "asc" | "desc" }>({
+    key: "lastUpdated",
+    direction: "desc",
+  });
    const router = useRouter();
 
    useEffect(() => {
@@ -101,7 +116,7 @@
         "property_status",
         "created_at",
       ];
-      const optionalColumns = ["source", "segment", "lifecycle_stage", "payment_status"];
+      const optionalColumns = ["source", "segment", "lifecycle_stage", "payment_status", "updated_at"];
       const allColumns = [...baseColumns, ...optionalColumns];
 
       let data: CustomerRow[] | null = null;
@@ -155,8 +170,24 @@
     [customers],
   );
 
-   const filteredCustomers = useMemo(() => {
-     return customers.filter((c) => {
+  function compareStrings(a: string | null | undefined, b: string | null | undefined) {
+    const av = (a ?? "").toLowerCase();
+    const bv = (b ?? "").toLowerCase();
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+    return 0;
+  }
+
+  function compareDates(a: string | null | undefined, b: string | null | undefined) {
+    const av = a ?? "";
+    const bv = b ?? "";
+    if (av < bv) return -1;
+    if (av > bv) return 1;
+    return 0;
+  }
+
+  const filteredCustomers = useMemo(() => {
+    const result = customers.filter((c) => {
        if (
          filters.search &&
          !`${c.name} ${c.email}`.toLowerCase().includes(filters.search.toLowerCase())
@@ -219,9 +250,66 @@
          }
        }
 
-       return true;
-     });
-   }, [customers, filters]);
+      return true;
+    });
+
+    const sorted = [...result].sort((a, b) => {
+      let cmp = 0;
+      switch (sort.key) {
+        case "lastUpdated": {
+          const aDate = a.updated_at ?? a.subscription_date ?? a.created_at;
+          const bDate = b.updated_at ?? b.subscription_date ?? b.created_at;
+          cmp = compareDates(aDate, bDate);
+          break;
+        }
+        case "name":
+          cmp = compareStrings(a.name, b.name);
+          break;
+        case "email":
+          cmp = compareStrings(a.email, b.email);
+          break;
+        case "status":
+          cmp = compareStrings(a.status, b.status);
+          break;
+        case "plan":
+          cmp = compareStrings(a.plan_type, b.plan_type);
+          break;
+        case "registration": {
+          const aReg = a.subscription_date ?? a.created_at;
+          const bReg = b.subscription_date ?? b.created_at;
+          cmp = compareDates(aReg, bReg);
+          break;
+        }
+        case "nextRenewal":
+          cmp = compareDates(a.next_renewal_date, b.next_renewal_date);
+          break;
+        case "payment": {
+          const aPay = getPaymentStatus(a);
+          const bPay = getPaymentStatus(b);
+          cmp = compareStrings(aPay, bPay);
+          break;
+        }
+        default:
+          cmp = 0;
+      }
+      return sort.direction === "asc" ? cmp : -cmp;
+    });
+
+    return sorted;
+  }, [customers, filters, sort]);
+
+  function handleSort(key: SortKey) {
+    setSort((prev) =>
+      prev.key === key
+        ? { key, direction: prev.direction === "asc" ? "desc" : "asc" }
+        : { key, direction: "asc" },
+    );
+  }
+
+  function renderSortIndicator(key: SortKey) {
+    if (sort.key !== key) return null;
+    return <span className="ml-1 text-[10px]">{sort.direction === "asc" ? "▲" : "▼"}</span>;
+  }
 
   return (
     <div>
@@ -452,21 +540,76 @@
            <table className="w-full text-left">
              <thead className="bg-stone-50 border-b border-stone-200">
                <tr>
-                 <th className="px-4 py-3 font-medium text-stone-900">Name</th>
-                 <th className="px-4 py-3 font-medium text-stone-900">Email</th>
-                 <th className="px-4 py-3 font-medium text-stone-900">Status</th>
-                 <th className="px-4 py-3 font-medium text-stone-900">
-                   Plan / city
-                 </th>
-                 <th className="px-4 py-3 font-medium text-stone-900">
-                   Registration
-                 </th>
-                 <th className="px-4 py-3 font-medium text-stone-900">
-                   Next renewal
-                 </th>
-                 <th className="px-4 py-3 font-medium text-stone-900">
-                   Payment
-                 </th>
+                <th className="px-4 py-3 font-medium text-stone-900">
+                  <button
+                    type="button"
+                    onClick={() => handleSort("name")}
+                    className="inline-flex items-center"
+                  >
+                    Name
+                    {renderSortIndicator("name")}
+                  </button>
+                </th>
+                <th className="px-4 py-3 font-medium text-stone-900">
+                  <button
+                    type="button"
+                    onClick={() => handleSort("email")}
+                    className="inline-flex items-center"
+                  >
+                    Email
+                    {renderSortIndicator("email")}
+                  </button>
+                </th>
+                <th className="px-4 py-3 font-medium text-stone-900">
+                  <button
+                    type="button"
+                    onClick={() => handleSort("status")}
+                    className="inline-flex items-center"
+                  >
+                    Status
+                    {renderSortIndicator("status")}
+                  </button>
+                </th>
+                <th className="px-4 py-3 font-medium text-stone-900">
+                  <button
+                    type="button"
+                    onClick={() => handleSort("plan")}
+                    className="inline-flex items-center"
+                  >
+                    Plan / city
+                    {renderSortIndicator("plan")}
+                  </button>
+                </th>
+                <th className="px-4 py-3 font-medium text-stone-900">
+                  <button
+                    type="button"
+                    onClick={() => handleSort("registration")}
+                    className="inline-flex items-center"
+                  >
+                    Registration
+                    {renderSortIndicator("registration")}
+                  </button>
+                </th>
+                <th className="px-4 py-3 font-medium text-stone-900">
+                  <button
+                    type="button"
+                    onClick={() => handleSort("nextRenewal")}
+                    className="inline-flex items-center"
+                  >
+                    Next renewal
+                    {renderSortIndicator("nextRenewal")}
+                  </button>
+                </th>
+                <th className="px-4 py-3 font-medium text-stone-900">
+                  <button
+                    type="button"
+                    onClick={() => handleSort("payment")}
+                    className="inline-flex items-center"
+                  >
+                    Payment
+                    {renderSortIndicator("payment")}
+                  </button>
+                </th>
                </tr>
              </thead>
              <tbody>
