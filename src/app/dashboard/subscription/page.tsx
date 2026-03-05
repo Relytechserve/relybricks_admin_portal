@@ -36,6 +36,8 @@ export default function SubscriptionPage() {
   const [formIsCustom, setFormIsCustom] = useState(false);
   const [formCity, setFormCity] = useState("");
   const [formAmount, setFormAmount] = useState<number | "">("");
+  const [editCity, setEditCity] = useState("");
+  const [editAmount, setEditAmount] = useState<number | "">("");
   const router = useRouter();
 
   useEffect(() => {
@@ -204,6 +206,32 @@ export default function SubscriptionPage() {
 
     setSavingTier(false);
     setEditingTierId(null);
+  }
+
+  async function handleAddCityPrice(tier: TierWithPrices) {
+    if (!editCity.trim() || editAmount === "") return;
+    const supabase = createClient();
+
+    const { data, error } = await supabase
+      .from("subscription_tier_prices")
+      .insert({
+        tier_id: tier.id,
+        city: editCity.trim(),
+        amount: Number(editAmount),
+      })
+      .select("id, tier_id, city, amount, currency, is_active")
+      .single();
+
+    if (error || !data) return;
+
+    const price = data as SubscriptionTierPrice;
+    setTiers((prev) =>
+      prev.map((t) =>
+        t.id === tier.id ? { ...t, prices: [...t.prices, price] } : t,
+      ),
+    );
+    setEditCity("");
+    setEditAmount("");
   }
 
   return (
@@ -379,6 +407,33 @@ export default function SubscriptionPage() {
                             />
                           </div>
                         ))}
+                        <div className="mt-2 flex items-center gap-2 text-xs">
+                          <input
+                            type="text"
+                            placeholder="New city"
+                            value={editCity}
+                            onChange={(event) => setEditCity(event.target.value)}
+                            className="w-20 rounded border border-stone-300 px-2 py-1"
+                          />
+                          <input
+                            type="number"
+                            placeholder="Amount"
+                            value={editAmount}
+                            onChange={(event) =>
+                              setEditAmount(
+                                event.target.value === "" ? "" : Number(event.target.value),
+                              )
+                            }
+                            className="w-24 rounded border border-stone-300 px-2 py-1"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => handleAddCityPrice(tier)}
+                            className="rounded border border-stone-300 bg-white px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                          >
+                            Add city
+                          </button>
+                        </div>
                       </>
                     ) : (
                       <p className="text-xs text-stone-500">
