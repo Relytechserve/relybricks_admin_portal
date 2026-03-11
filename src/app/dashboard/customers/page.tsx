@@ -414,9 +414,6 @@ type SortKey =
 
       <section className="mt-6 bg-white rounded-xl border border-stone-200 p-4">
         <h3 className="text-sm font-semibold text-stone-900">Create new customer account</h3>
-        <p className="mt-1 text-xs text-stone-500">
-          For new customers only. Existing customers: open their detail page to set up or reset login. Requires <code className="rounded bg-stone-100 px-1">SUPABASE_SERVICE_ROLE_KEY</code> in .env.local.
-        </p>
         <form onSubmit={handleCreateCustomer} className="mt-4 grid gap-3 md:grid-cols-3">
           <input
             type="text"

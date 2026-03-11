@@ -55,6 +55,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const isCustomers =
     pathname === "/dashboard/customers" ||
     pathname?.startsWith("/dashboard/customers/");
+  const isReports = pathname === "/dashboard/reports";
 
   useEffect(() => {
     const supabase = createClient();
@@ -77,7 +78,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const navItems = [
     { href: "/dashboard", label: "Insight", icon: "insight", active: isDashboard },
     { href: "/dashboard/customers", label: "Customers", icon: "customers", active: isCustomers },
-    { href: "/dashboard/customers", label: "Properties", icon: "properties", active: false },
+    { href: "/dashboard/reports", label: "Reports", icon: "properties", active: isReports },
     { href: "/dashboard/subscription", label: "Subscription", icon: "subscription", active: pathname?.startsWith("/dashboard/subscription") ?? false },
   ] as const;
 
@@ -219,6 +220,16 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                 }
               >
                 Customers
+              </Link>
+              <Link
+                href="/dashboard/reports"
+                className={
+                  isReports
+                    ? "text-violet-700"
+                    : "hover:text-stone-900"
+                }
+              >
+                Reports
               </Link>
             </nav>
           </div>

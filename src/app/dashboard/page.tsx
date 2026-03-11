@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import type { PostgrestError } from "@supabase/supabase-js";
@@ -11,8 +11,8 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip,
   ResponsiveContainer,
+  Cell,
 } from "recharts";
 
 type CustomerSummary = {
@@ -41,6 +41,8 @@ type MonthCustomer = { id: string; name: string; amount: number };
 type MonthData = { month: string; label: string; revenue: number; customers: MonthCustomer[] };
 type RecentActivity = { id: string; name: string; created_at: string };
 
+type DatePreset = "week" | "month" | "year" | "last_year" | "custom";
+
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function formatRelative(dateStr: string) {
@@ -57,10 +59,13 @@ function formatRelative(dateStr: string) {
 
 export default function AdminDashboardPage() {
   const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [chartData, setChartData] = useState<MonthData[]>([]);
-  const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
+  const [customers, setCustomers] = useState<(CustomerSummary & { id?: string; name?: string })[]>([]);
+  const [totalProperties, setTotalProperties] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [datePreset, setDatePreset] = useState<DatePreset>("year");
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo] = useState("");
+  const [selectedMonth, setSelectedMonth] = useState<MonthData | null>(null);
   const router = useRouter();
 
   useEffect(() => {
@@ -79,7 +84,6 @@ export default function AdminDashboardPage() {
         return;
       }
 
-      const currentYear = new Date().getFullYear();
       const { data: customers, error: custError } = (await supabase
         .from("customers")
         .select(
@@ -94,88 +98,146 @@ export default function AdminDashboardPage() {
 
       const list = customers ?? [];
 
-      const totalCustomers = list.length;
-      const activeCustomers = list.filter((c) => c.status === "Active").length;
-      const today = new Date();
-      const in30Days = new Date();
-      in30Days.setDate(today.getDate() + 30);
-      const upcomingRenewals = list.filter((c) => {
-        if (!c.next_renewal_date) return false;
-        const d = new Date(c.next_renewal_date);
-        return d >= today && d <= in30Days;
-      }).length;
-      const totalRevenue = list.reduce((sum, c) => sum + (c.package_revenue ?? 0), 0);
-      const churnRiskCustomers = list.filter((c) => c.lifecycle_stage === "churn_risk").length;
-      const overdueCustomers = list.filter((c) => {
-        if (c.payment_status === "overdue") return true;
-        return (c.outstanding_amount ?? 0) > 0 && c.status === "Active";
-      }).length;
+      setCustomers(list);
 
-      let totalProperties = 0;
+      let propertiesCount = 0;
       const { count } = await supabase
         .from("customer_properties")
         .select("id", { count: "exact", head: true });
-      if (count != null) totalProperties = count;
-
-      setStats({
-        totalCustomers,
-        activeCustomers,
-        upcomingRenewals,
-        totalRevenue,
-        churnRiskCustomers,
-        overdueCustomers,
-        totalProperties,
-      });
-
-      // Revenue insights: cash-based view – when subscription payments are received
-      const byMonth: Record<number, number> = {};
-      const byMonthCustomers: Record<number, MonthCustomer[]> = {};
-      for (let m = 1; m <= 12; m++) {
-        byMonth[m] = 0;
-        byMonthCustomers[m] = [];
-      }
-      list.forEach((c) => {
-        if (!c.package_revenue || !c.id || !c.name) return;
-        const amount = c.package_revenue;
-
-        if (c.subscription_date) {
-          const start = new Date(c.subscription_date);
-          if (!Number.isNaN(start.getTime()) && start.getFullYear() === currentYear) {
-            const key = start.getMonth() + 1;
-            byMonth[key] += amount;
-            byMonthCustomers[key].push({ id: c.id, name: c.name, amount });
-          }
-        }
-
-        if (c.next_renewal_date) {
-          const renewal = new Date(c.next_renewal_date);
-          if (!Number.isNaN(renewal.getTime()) && renewal.getFullYear() === currentYear) {
-            const key = renewal.getMonth() + 1;
-            byMonth[key] += amount;
-            byMonthCustomers[key].push({ id: c.id, name: c.name, amount });
-          }
-        }
-      });
-      const chart: MonthData[] = MONTH_LABELS.map((label, i) => ({
-        month: String(i + 1),
-        label,
-        revenue: byMonth[i + 1] ?? 0,
-        customers: byMonthCustomers[i + 1] ?? [],
-      }));
-      setChartData(chart);
-
-      const recent = (list as { id?: string; name?: string; created_at?: string }[])
-        .filter((c) => c.id && c.name)
-        .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-        .slice(0, 8)
-        .map((c) => ({ id: c.id!, name: c.name!, created_at: c.created_at ?? "" }));
-      setRecentActivity(recent);
+      if (count != null) propertiesCount = count;
+      setTotalProperties(propertiesCount);
 
       setLoading(false);
     }
 
     load();
   }, [router]);
+
+  const { stats, chartData, recentActivity } = useMemo(() => {
+    if (!customers.length || totalProperties == null) {
+      return {
+        stats: null,
+        chartData: [] as MonthData[],
+        recentActivity: [] as RecentActivity[],
+      };
+    }
+
+    const today = new Date();
+    let rangeStart: Date | null = null;
+    let rangeEnd: Date | null = null;
+
+    if (datePreset === "week") {
+      rangeEnd = today;
+      rangeStart = new Date();
+      rangeStart.setDate(today.getDate() - 6);
+    } else if (datePreset === "month") {
+      rangeEnd = today;
+      rangeStart = new Date(today.getFullYear(), today.getMonth(), 1);
+    } else if (datePreset === "year") {
+      rangeEnd = today;
+      rangeStart = new Date(today.getFullYear(), 0, 1);
+    } else if (datePreset === "last_year") {
+      const lastYear = today.getFullYear() - 1;
+      rangeStart = new Date(lastYear, 0, 1);
+      rangeEnd = new Date(lastYear, 11, 31);
+    } else if (datePreset === "custom") {
+      rangeStart = customFrom ? new Date(customFrom) : null;
+      rangeEnd = customTo ? new Date(customTo) : null;
+    }
+
+    const inRange = (d: Date | null) => {
+      if (!d || Number.isNaN(d.getTime())) return false;
+      if (rangeStart && d < rangeStart) return false;
+      if (rangeEnd) {
+        const endOfDay = new Date(rangeEnd);
+        endOfDay.setHours(23, 59, 59, 999);
+        if (d > endOfDay) return false;
+      }
+      return true;
+    };
+
+    const filtered = customers.filter((c) => {
+      const base = c.subscription_date ?? c.created_at;
+      if (!rangeStart && !rangeEnd) return true;
+      if (!base) return false;
+      const d = new Date(base);
+      return inRange(d);
+    });
+
+    const list = filtered.length ? filtered : customers;
+
+    const totalCustomers = list.length;
+    const activeCustomers = list.filter((c) => c.status === "Active").length;
+    const in30Days = new Date();
+    in30Days.setDate(today.getDate() + 30);
+    const upcomingRenewals = list.filter((c) => {
+      if (!c.next_renewal_date) return false;
+      const d = new Date(c.next_renewal_date);
+      if (!inRange(d)) return false;
+      return d >= today && d <= in30Days;
+    }).length;
+    const totalRevenue = list.reduce((sum, c) => sum + (c.package_revenue ?? 0), 0);
+    const churnRiskCustomers = list.filter((c) => c.lifecycle_stage === "churn_risk").length;
+    const overdueCustomers = list.filter((c) => {
+      if (c.payment_status === "overdue") return true;
+      return (c.outstanding_amount ?? 0) > 0 && c.status === "Active";
+    }).length;
+
+    const stats: DashboardStats = {
+      totalCustomers,
+      activeCustomers,
+      upcomingRenewals,
+      totalRevenue,
+      churnRiskCustomers,
+      overdueCustomers,
+      totalProperties,
+    };
+
+    const byMonth: Record<number, number> = {};
+    const byMonthCustomers: Record<number, MonthCustomer[]> = {};
+    for (let m = 1; m <= 12; m++) {
+      byMonth[m] = 0;
+      byMonthCustomers[m] = [];
+    }
+
+    list.forEach((c) => {
+      if (!c.package_revenue || !c.id || !c.name) return;
+      const amount = c.package_revenue;
+
+      if (c.subscription_date) {
+        const start = new Date(c.subscription_date);
+        if (inRange(start)) {
+          const key = start.getMonth() + 1;
+          byMonth[key] += amount;
+          byMonthCustomers[key].push({ id: c.id, name: c.name, amount });
+        }
+      }
+
+      if (c.next_renewal_date) {
+        const renewal = new Date(c.next_renewal_date);
+        if (inRange(renewal)) {
+          const key = renewal.getMonth() + 1;
+          byMonth[key] += amount;
+          byMonthCustomers[key].push({ id: c.id, name: c.name, amount });
+        }
+      }
+    });
+
+    const chartData: MonthData[] = MONTH_LABELS.map((label, i) => ({
+      month: String(i + 1),
+      label,
+      revenue: byMonth[i + 1] ?? 0,
+      customers: byMonthCustomers[i + 1] ?? [],
+    }));
+
+    const recentActivity: RecentActivity[] = (list as { id?: string; name?: string; created_at?: string }[])
+      .filter((c) => c.id && c.name)
+      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
+      .slice(0, 8)
+      .map((c) => ({ id: c.id!, name: c.name!, created_at: c.created_at ?? "" }));
+
+    return { stats, chartData, recentActivity };
+  }, [customers, totalProperties, datePreset, customFrom, customTo]);
 
   if (loading) {
     return (
@@ -224,8 +286,42 @@ export default function AdminDashboardPage() {
 
   return (
     <div className="max-w-6xl">
-      <h1 className="text-xl font-bold text-stone-900">Dashboard Overview</h1>
-      <p className="mt-1 text-stone-600">Welcome back! Here&apos;s what&apos;s happening today.</p>
+      <div className="flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+        <div>
+          <h1 className="text-xl font-bold text-stone-900">Dashboard Overview</h1>
+          <p className="mt-1 text-stone-600">Filter your insights by time period.</p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={datePreset}
+            onChange={(event) => setDatePreset(event.target.value as DatePreset)}
+            className="rounded-lg border border-stone-300 bg-white px-3 py-2 text-xs md:text-sm text-stone-800 focus:outline-none focus:ring-2 focus:ring-violet-500"
+          >
+            <option value="week">Last 7 days</option>
+            <option value="month">This month</option>
+            <option value="year">This year</option>
+            <option value="last_year">Last year</option>
+            <option value="custom">Custom range</option>
+          </select>
+          {datePreset === "custom" && (
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={customFrom}
+                onChange={(event) => setCustomFrom(event.target.value)}
+                className="rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs md:text-sm text-stone-800 focus:outline-none focus:ring-2 focus:ring-violet-500"
+              />
+              <span className="text-xs text-stone-500">to</span>
+              <input
+                type="date"
+                value={customTo}
+                onChange={(event) => setCustomTo(event.target.value)}
+                className="rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs md:text-sm text-stone-800 focus:outline-none focus:ring-2 focus:ring-violet-500"
+              />
+            </div>
+          )}
+        </div>
+      </div>
 
       <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {metricCards.map((card) => (
@@ -267,45 +363,78 @@ export default function AdminDashboardPage() {
         <div className="lg:col-span-2 bg-white rounded-xl border border-stone-200 p-4">
           <h2 className="text-base font-semibold text-stone-900">Revenue insights</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Subscription cash inflow by month — {new Date().getFullYear()}
+            Subscription cash inflow by month —{" "}
+            {datePreset === "week" && "last 7 days"}
+            {datePreset === "month" && "this month"}
+            {datePreset === "year" && "this year"}
+            {datePreset === "last_year" && "last year"}
+            {datePreset === "custom" && "custom date range"}
           </p>
-          <div className="mt-4 h-64">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" vertical={false} />
-                <XAxis dataKey="label" tick={{ fontSize: 12 }} stroke="#a8a29e" />
-                <YAxis
-                  tick={{ fontSize: 12 }}
-                  stroke="#a8a29e"
-                  allowDecimals={false}
-                  tickFormatter={(v: number) =>
-                    `₹${Math.round(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
-                  }
-                />
-                <Tooltip
-                  formatter={(
-                    value: number | undefined,
-                    _name: string | undefined,
-                    item: unknown,
-                  ) => {
-                    const payload = (item as { payload?: MonthData })?.payload;
-                    const names =
-                      payload && payload.customers.length > 0
-                        ? payload.customers.map((c) => c.name).join(", ")
-                        : "No customers";
-                    const label = `Revenue (${names})`;
-                    return [
-                      `₹${Math.round(value ?? 0).toLocaleString("en-IN", {
-                        maximumFractionDigits: 0,
-                      })}`,
-                      label,
-                    ];
-                  }}
-                  labelFormatter={(_, payload) => (payload?.[0]?.payload as MonthData | undefined)?.label ?? ""}
-                />
-                <Bar dataKey="revenue" fill="#14b8a6" radius={[4, 4, 0, 0]} name="Revenue" />
-              </BarChart>
-            </ResponsiveContainer>
+          <div className="mt-4 flex gap-4">
+            <div className="flex-1 min-w-0 h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={chartData} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fontSize: 12 }} stroke="#a8a29e" />
+                  <YAxis
+                    tick={{ fontSize: 12 }}
+                    stroke="#a8a29e"
+                    allowDecimals={false}
+                    tickFormatter={(v: number) =>
+                      `₹${Math.round(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+                    }
+                  />
+                  <Bar dataKey="revenue" fill="#14b8a6" radius={[4, 4, 0, 0]} name="Revenue">
+                    {chartData.map((entry) => (
+                      <Cell
+                        key={entry.month}
+                        fill={selectedMonth?.month === entry.month ? "#0d9488" : "#14b8a6"}
+                        onClick={() => setSelectedMonth((prev) => (prev?.month === entry.month ? null : entry))}
+                        style={{ cursor: "pointer" }}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div
+              className={`w-56 h-64 shrink-0 border border-stone-200 rounded-lg bg-stone-50 transition-opacity ${
+                selectedMonth ? "opacity-100" : "opacity-40"
+              }`}
+            >
+              {selectedMonth ? (
+                <div className="p-3 h-full flex flex-col min-h-0">
+                  <p className="text-sm font-semibold text-stone-900">{selectedMonth.label}</p>
+                  <p className="text-xs text-stone-600 mt-0.5">
+                    ₹{Math.round(selectedMonth.revenue).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                  </p>
+                  <div className="mt-2 flex-1 min-h-0 overflow-y-auto">
+                    {selectedMonth.customers.length === 0 ? (
+                      <p className="text-xs text-stone-500">No customers</p>
+                    ) : (
+                      <ul className="space-y-1.5 text-xs">
+                        {selectedMonth.customers.map((c) => (
+                          <li key={c.id}>
+                            <Link
+                              href={`/dashboard/customers/${c.id}`}
+                              className="text-stone-800 hover:text-violet-600 hover:underline block truncate"
+                              title={c.name}
+                            >
+                              {c.name}
+                            </Link>
+                            <span className="text-stone-500">₹{c.amount.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="p-3 h-full flex items-center justify-center">
+                  <p className="text-xs text-stone-500 text-center">Click a bar to see customers</p>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

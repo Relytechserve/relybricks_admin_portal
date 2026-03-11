@@ -676,6 +676,21 @@ function joinName(title: string, first: string, last: string): string {
         View and enrich key information for this customer.
        </p>
 
+       {!loading && !error && form && (
+         <div className="mt-3 flex flex-wrap items-center gap-3">
+           <button
+             type="button"
+             onClick={() => {
+               if (!form?.id) return;
+               window.location.href = `/api/reports/customer/${encodeURIComponent(String(form.id))}`;
+             }}
+             className="inline-flex items-center rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-800 hover:bg-stone-50"
+           >
+             Export to Excel
+           </button>
+         </div>
+       )}
+
        {!loading && !error && (
          <div className="mt-4 flex flex-wrap items-center gap-3">
            <button
