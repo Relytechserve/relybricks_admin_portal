@@ -1,6 +1,6 @@
  "use client";
 
- import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
  import Link from "next/link";
  import { useRouter } from "next/navigation";
  import { createClient } from "@/lib/supabase";
@@ -43,6 +43,15 @@
    renewalTo: string;
  };
 
+type CreateCustomerForm = {
+  name: string;
+  email: string;
+  password: string;
+  phone: string;
+  whatsapp: string;
+  preferred_contact: "" | "email" | "whatsapp" | "both";
+};
+
 type SortKey =
   | "lastUpdated"
   | "name"
@@ -79,6 +88,17 @@ type SortKey =
     key: "lastUpdated",
     direction: "desc",
   });
+  const [createForm, setCreateForm] = useState<CreateCustomerForm>({
+    name: "",
+    email: "",
+    password: "",
+    phone: "",
+    whatsapp: "",
+    preferred_contact: "",
+  });
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [createSuccess, setCreateSuccess] = useState<string | null>(null);
    const router = useRouter();
 
    useEffect(() => {
@@ -311,6 +331,70 @@ type SortKey =
     return <span className="ml-1 text-[10px]">{sort.direction === "asc" ? "▲" : "▼"}</span>;
   }
 
+  async function handleCreateCustomer(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setCreating(true);
+    setCreateError(null);
+    setCreateSuccess(null);
+
+    try {
+      const response = await fetch("/api/customers/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(createForm),
+      });
+
+      const result = (await response.json()) as {
+        error?: string;
+        customer?: { id: string; name: string; email: string; status: string };
+      };
+
+      if (!response.ok || !result.customer) {
+        setCreateError(result.error ?? "Failed to create customer account.");
+        return;
+      }
+
+      const customerRow: CustomerRow = {
+        id: result.customer.id,
+        name: result.customer.name,
+        email: result.customer.email,
+        status: result.customer.status,
+        plan_type: null,
+        source: null,
+        segment: null,
+        lifecycle_stage: "active",
+        payment_status: null,
+        subscription_date: null,
+        renewal_date: null,
+        next_renewal_date: null,
+        renewal_status: null,
+        package_revenue: null,
+        billed_amount: null,
+        property_city: null,
+        property_area: null,
+        property_type: null,
+        property_status: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      setCustomers((prev) => [customerRow, ...prev]);
+      setCreateForm({
+        name: "",
+        email: "",
+        password: "",
+        phone: "",
+        whatsapp: "",
+        preferred_contact: "",
+      });
+      setCreateSuccess("Customer account created. They can now log in from the website.");
+    } catch {
+      setCreateError("Failed to create customer account.");
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <div>
       <div className="flex items-baseline justify-between gap-4 flex-wrap">
@@ -327,6 +411,90 @@ type SortKey =
           </p>
         )}
       </div>
+
+      <section className="mt-6 bg-white rounded-xl border border-stone-200 p-4">
+        <h3 className="text-sm font-semibold text-stone-900">Create new customer account</h3>
+        <p className="mt-1 text-xs text-stone-500">
+          For new customers only. Existing customers: open their detail page to set up or reset login. Requires <code className="rounded bg-stone-100 px-1">SUPABASE_SERVICE_ROLE_KEY</code> in .env.local.
+        </p>
+        <form onSubmit={handleCreateCustomer} className="mt-4 grid gap-3 md:grid-cols-3">
+          <input
+            type="text"
+            placeholder="Full name"
+            required
+            value={createForm.name}
+            onChange={(event) =>
+              setCreateForm((prev) => ({ ...prev, name: event.target.value }))
+            }
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <input
+            type="email"
+            placeholder="Email"
+            required
+            value={createForm.email}
+            onChange={(event) =>
+              setCreateForm((prev) => ({ ...prev, email: event.target.value }))
+            }
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <input
+            type="password"
+            placeholder="Temporary password (min 8 chars)"
+            required
+            minLength={8}
+            value={createForm.password}
+            onChange={(event) =>
+              setCreateForm((prev) => ({ ...prev, password: event.target.value }))
+            }
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <input
+            type="tel"
+            placeholder="Phone (optional)"
+            value={createForm.phone}
+            onChange={(event) =>
+              setCreateForm((prev) => ({ ...prev, phone: event.target.value }))
+            }
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <input
+            type="tel"
+            placeholder="WhatsApp (optional)"
+            value={createForm.whatsapp}
+            onChange={(event) =>
+              setCreateForm((prev) => ({ ...prev, whatsapp: event.target.value }))
+            }
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+          <select
+            value={createForm.preferred_contact}
+            onChange={(event) =>
+              setCreateForm((prev) => ({
+                ...prev,
+                preferred_contact: event.target.value as CreateCustomerForm["preferred_contact"],
+              }))
+            }
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <option value="">Preferred contact (optional)</option>
+            <option value="email">Email</option>
+            <option value="whatsapp">WhatsApp</option>
+            <option value="both">Email & WhatsApp</option>
+          </select>
+          <div className="md:col-span-3 flex flex-wrap items-center gap-3">
+            <button
+              type="submit"
+              disabled={creating}
+              className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 disabled:opacity-60"
+            >
+              {creating ? "Creating..." : "Create customer account"}
+            </button>
+            {createSuccess && <p className="text-sm text-emerald-700">{createSuccess}</p>}
+            {createError && <p className="text-sm text-red-600">{createError}</p>}
+          </div>
+        </form>
+      </section>
 
       {/* Filters: always visible so layout is stable */}
       <div

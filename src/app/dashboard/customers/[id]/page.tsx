@@ -9,6 +9,7 @@
    id: string;
    name: string;
    email: string;
+   auth_user_id: string | null;
   source: string | null;
   segment: string | null;
   lifecycle_stage: string | null;
@@ -132,6 +133,10 @@ type SubscriptionTierPrice = {
   const [savingNote, setSavingNote] = useState(false);
   const [tiers, setTiers] = useState<SubscriptionTier[]>([]);
   const [tierPrices, setTierPrices] = useState<SubscriptionTierPrice[]>([]);
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [loginSuccess, setLoginSuccess] = useState<string | null>(null);
 
    const id = params?.id;
 
@@ -163,6 +168,7 @@ type SubscriptionTierPrice = {
              "id",
              "name",
              "email",
+             "auth_user_id",
              "source",
              "segment",
              "lifecycle_stage",
@@ -540,6 +546,46 @@ type SubscriptionTierPrice = {
      if (data?.signedUrl) window.open(data.signedUrl, "_blank");
    }
 
+  async function handleCustomerLogin(action: "setup" | "reset") {
+    if (!id || !loginPassword.trim() || loginPassword.length < 8) {
+      setLoginError("Password must be at least 8 characters.");
+      return;
+    }
+    setLoginLoading(true);
+    setLoginError(null);
+    setLoginSuccess(null);
+    try {
+      const res = await fetch(`/api/customers/${id}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, password: loginPassword }),
+      });
+      const data = (await res.json()) as { error?: string; success?: boolean; message?: string };
+      if (!res.ok) {
+        setLoginError(data.error ?? "Request failed.");
+        return;
+      }
+      setLoginSuccess(data.message ?? (action === "setup" ? "Login created." : "Password reset."));
+      setLoginPassword("");
+      if (action === "setup" && form) {
+        const supabase = createClient();
+        const { data: refreshed } = await supabase
+          .from("customers")
+          .select("auth_user_id")
+          .eq("id", id)
+          .single();
+        if (refreshed) {
+          setForm({ ...form, auth_user_id: refreshed.auth_user_id });
+          setCustomer((c) => (c ? { ...c, auth_user_id: refreshed.auth_user_id } : c));
+        }
+      }
+    } catch {
+      setLoginError("Request failed.");
+    } finally {
+      setLoginLoading(false);
+    }
+  }
+
   async function handleAddNote() {
     if (!id || !newNoteBody.trim()) return;
     setSavingNote(true);
@@ -620,6 +666,68 @@ type SubscriptionTierPrice = {
        {!loading && !error && form && (
          <div className="mt-6 grid gap-4 md:grid-cols-3">
            <div className="md:col-span-2 space-y-4">
+             <div className="bg-white rounded-xl border border-stone-200 p-4">
+               <div className="flex items-center justify-between gap-2">
+                 <p className="text-sm font-medium text-stone-900">Customer login</p>
+                 <span
+                   className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                     form.auth_user_id
+                       ? "bg-emerald-50 text-emerald-700 border border-emerald-100"
+                       : "bg-amber-50 text-amber-700 border border-amber-100"
+                   }`}
+                 >
+                   {form.auth_user_id ? "Login active" : "No login"}
+                 </span>
+               </div>
+               <p className="mt-1 text-xs text-stone-500">
+                 Email: <span className="font-medium text-stone-700">{form.email}</span>
+               </p>
+               <p className="mt-1 text-xs text-stone-500">
+                 {form.auth_user_id
+                   ? "Customer can sign in at the website. Reset password below."
+                   : "Set up login so this customer can sign in at the website."}
+               </p>
+               <div className="mt-4 flex flex-wrap items-end gap-2">
+                 <div className="flex-1 min-w-[180px]">
+                   <label className="block text-xs text-stone-500 mb-1">
+                     {form.auth_user_id ? "New password" : "Password"}
+                   </label>
+                   <input
+                     type="password"
+                     value={loginPassword}
+                     onChange={(e) => {
+                       setLoginPassword(e.target.value);
+                       setLoginError(null);
+                     }}
+                     placeholder="Min 8 characters"
+                     minLength={8}
+                     className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                   />
+                 </div>
+                 {form.auth_user_id ? (
+                   <button
+                     type="button"
+                     onClick={() => handleCustomerLogin("reset")}
+                     disabled={loginLoading || loginPassword.length < 8}
+                     className="rounded-lg bg-stone-700 px-4 py-2 text-sm font-medium text-white hover:bg-stone-600 disabled:opacity-50"
+                   >
+                     {loginLoading ? "Resetting…" : "Reset password"}
+                   </button>
+                 ) : (
+                   <button
+                     type="button"
+                     onClick={() => handleCustomerLogin("setup")}
+                     disabled={loginLoading || loginPassword.length < 8}
+                     className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
+                   >
+                     {loginLoading ? "Setting up…" : "Set up login"}
+                   </button>
+                 )}
+               </div>
+               {loginSuccess && <p className="mt-3 text-sm text-emerald-700">{loginSuccess}</p>}
+               {loginError && <p className="mt-3 text-sm text-red-600">{loginError}</p>}
+             </div>
+
              <div className="bg-white rounded-xl border border-stone-200 p-4">
                <div className="flex items-start justify-between gap-4">
                  <div>
