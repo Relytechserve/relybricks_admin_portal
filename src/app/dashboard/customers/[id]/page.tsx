@@ -101,12 +101,48 @@ type SubscriptionTierPrice = {
    });
  }
 
- function formatCurrency(value: number | null) {
-   if (value == null) return null;
-   return `₹${Number(value).toLocaleString("en-IN", {
-     maximumFractionDigits: 0,
-   })}`;
- }
+function formatCurrency(value: number | null) {
+  if (value == null) return null;
+  return `₹${Number(value).toLocaleString("en-IN", {
+    maximumFractionDigits: 0,
+  })}`;
+}
+
+function splitName(fullName: string | null | undefined): {
+  title: string;
+  first: string;
+  last: string;
+} {
+  if (!fullName) return { title: "", first: "", last: "" };
+  const raw = fullName.trim().replace(/\s+/g, " ");
+  if (!raw) return { title: "", first: "", last: "" };
+
+  const parts = raw.split(" ");
+  const titles = new Set(["mr", "mr.", "mrs", "mrs.", "ms", "ms.", "dr", "dr."]);
+  let title = "";
+  let first = "";
+  let last = "";
+
+  if (parts.length > 0 && titles.has(parts[0].toLowerCase())) {
+    title = parts[0];
+    first = parts[1] ?? "";
+    last = parts.slice(2).join(" ");
+  } else {
+    first = parts[0];
+    last = parts.slice(1).join(" ");
+  }
+
+  return {
+    title: title,
+    first,
+    last,
+  };
+}
+
+function joinName(title: string, first: string, last: string): string {
+  const pieces = [title.trim(), first.trim(), last.trim()].filter(Boolean);
+  return pieces.join(" ");
+}
 
  export default function CustomerDetailPage() {
    const params = useParams<{ id: string }>();
@@ -137,6 +173,9 @@ type SubscriptionTierPrice = {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loginSuccess, setLoginSuccess] = useState<string | null>(null);
+  const [nameTitle, setNameTitle] = useState("");
+  const [nameFirst, setNameFirst] = useState("");
+  const [nameLast, setNameLast] = useState("");
 
    const id = params?.id;
 
@@ -220,6 +259,10 @@ type SubscriptionTierPrice = {
       const customerData = data as unknown as Customer;
       setCustomer(customerData);
       setForm(customerData);
+      const nameParts = splitName(customerData.name);
+      setNameTitle(nameParts.title);
+      setNameFirst(nameParts.first);
+      setNameLast(nameParts.last);
 
       const { data: propsData, error: propsError } = await supabase
         .from("customer_properties")
@@ -359,12 +402,13 @@ type SubscriptionTierPrice = {
    }
 
    async function handleSave() {
-     if (!form || !customer) return;
+    if (!form || !customer) return;
      setSaving(true);
      setSaveError(null);
      setSaveSuccess(false);
 
     const lifecycleStage = computeLifecycleStage(form);
+    const fullName = joinName(nameTitle, nameFirst, nameLast) || form.name;
 
     if (form.subscription_tier_id && !tiers.length) {
       setSaveError("Subscription tiers are still loading. Please try again.");
@@ -385,7 +429,7 @@ type SubscriptionTierPrice = {
      const { error: updateError } = await supabase
        .from("customers")
        .update({
-         name: form.name,
+        name: fullName,
          email: form.email,
          phone: form.phone,
          whatsapp: form.whatsapp,
@@ -731,10 +775,40 @@ type SubscriptionTierPrice = {
              <div className="bg-white rounded-xl border border-stone-200 p-4">
                <div className="flex items-start justify-between gap-4">
                  <div>
-                   <p className="text-sm text-stone-500">Name</p>
-                   <p className="mt-1 text-base font-semibold text-stone-900">
-                     {form.name}
-                   </p>
+                  <p className="text-sm text-stone-500">Name</p>
+                  <div className="mt-2 grid gap-2 md:grid-cols-3">
+                    <select
+                      value={nameTitle}
+                      onChange={(event) => setNameTitle(event.target.value)}
+                      className="rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Title</option>
+                      <option value="Mr">Mr</option>
+                      <option value="Ms">Ms</option>
+                      <option value="Mrs">Mrs</option>
+                      <option value="Dr">Dr</option>
+                    </select>
+                    <input
+                      type="text"
+                      placeholder="First name"
+                      value={nameFirst}
+                      onChange={(event) => setNameFirst(event.target.value)}
+                      className="rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Last name"
+                      value={nameLast}
+                      onChange={(event) => setNameLast(event.target.value)}
+                      className="rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <p className="mt-1 text-xs text-stone-500">
+                    Stored as:{" "}
+                    <span className="font-medium text-stone-800">
+                      {joinName(nameTitle, nameFirst, nameLast) || form.name}
+                    </span>
+                  </p>
                    <p className="mt-2 text-xs font-medium text-stone-500">
                      {form.plan_type ?? "Plan not set"} •{" "}
                      {form.lifecycle_stage ?? form.status}
