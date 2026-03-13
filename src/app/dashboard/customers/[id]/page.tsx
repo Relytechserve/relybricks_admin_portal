@@ -90,6 +90,14 @@ type SubscriptionTierPrice = {
   is_active: boolean;
 };
 
+type CustomerTransaction = {
+  id: string;
+  type: "renewal" | "payment" | "other";
+  amount: number | null;
+  description: string | null;
+  date: string;
+};
+
  function formatDate(value: string | null) {
    if (!value) return null;
    const date = new Date(value);
@@ -176,6 +184,15 @@ function joinName(title: string, first: string, last: string): string {
   const [nameTitle, setNameTitle] = useState("");
   const [nameFirst, setNameFirst] = useState("");
   const [nameLast, setNameLast] = useState("");
+  const [transactions, setTransactions] = useState<CustomerTransaction[]>([]);
+  const [loadingTransactions, setLoadingTransactions] = useState(true);
+  const [transactionError, setTransactionError] = useState<string | null>(null);
+  const [newTransactionType, setNewTransactionType] = useState<CustomerTransaction["type"]>("renewal");
+  const [newTransactionAmount, setNewTransactionAmount] = useState("");
+  const [newTransactionDate, setNewTransactionDate] = useState("");
+  const [newTransactionDescription, setNewTransactionDescription] = useState("");
+  const [savingTransaction, setSavingTransaction] = useState(false);
+  const [transactionSuccess, setTransactionSuccess] = useState<string | null>(null);
 
    const id = params?.id;
 
@@ -322,6 +339,18 @@ function joinName(title: string, first: string, last: string): string {
       if (notesData) {
         setNotes(notesData as unknown as CustomerNote[]);
       }
+      const { data: transactionData, error: transactionLoadError } = await supabase
+        .from("transactions")
+        .select("id, type, amount, description, date")
+        .eq("customer_id", id)
+        .order("date", { ascending: false });
+      if (transactionLoadError) {
+        setTransactionError("Failed to load transactions.");
+      } else {
+        setTransactions((transactionData ?? []) as unknown as CustomerTransaction[]);
+        setTransactionError(null);
+      }
+      setLoadingTransactions(false);
        setLoading(false);
        setLoadingProperties(false);
      }
@@ -333,6 +362,13 @@ function joinName(title: string, first: string, last: string): string {
     () => formatDate(form?.next_renewal_date ?? null),
     [form?.next_renewal_date],
   );
+
+  useEffect(() => {
+    if (!newTransactionDate) {
+      const today = new Date().toISOString().slice(0, 10);
+      setNewTransactionDate(today);
+    }
+  }, [newTransactionDate]);
 
    const paymentStatus = useMemo(() => {
      if (!form) return null;
@@ -655,6 +691,42 @@ function joinName(title: string, first: string, last: string): string {
     setNotes((prev) => [data as unknown as CustomerNote, ...prev]);
     setNewNoteBody("");
     setNewNoteCustomerVisible(false);
+  }
+
+  async function handleAddTransaction() {
+    if (!id || !newTransactionDate) return;
+    setSavingTransaction(true);
+    setTransactionError(null);
+    setTransactionSuccess(null);
+    const supabase = createClient();
+    const amount =
+      newTransactionAmount.trim() === "" ? null : Number(newTransactionAmount.trim());
+
+    const { data, error } = await supabase
+      .from("transactions")
+      .insert({
+        customer_id: id,
+        type: newTransactionType,
+        amount,
+        description: newTransactionDescription.trim() || null,
+        date: newTransactionDate,
+      })
+      .select("id, type, amount, description, date")
+      .single();
+
+    setSavingTransaction(false);
+    if (error || !data) {
+      setTransactionError("Failed to add transaction.");
+      return;
+    }
+
+    setTransactions((prev) => [data as unknown as CustomerTransaction, ...prev]);
+    setTransactionSuccess("Transaction added.");
+    setNewTransactionType("renewal");
+    setNewTransactionAmount("");
+    setNewTransactionDescription("");
+    setNewTransactionDate(new Date().toISOString().slice(0, 10));
+    setTimeout(() => setTransactionSuccess(null), 3000);
   }
 
    return (
@@ -1357,6 +1429,113 @@ function joinName(title: string, first: string, last: string): string {
                    <option value="write_off">Write off</option>
                  </select>
                </div>
+            </div>
+            <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-sm font-medium text-stone-900">Transactions & renewals</p>
+                {!loadingTransactions && transactions.length > 0 && (
+                  <p className="text-xs text-stone-500">
+                    {transactions.length} entry{transactions.length === 1 ? "" : "ies"}
+                  </p>
+                )}
+              </div>
+              <p className="text-xs text-stone-500">
+                Log when renewal payments or other billing events are completed. These entries are
+                visible to the customer in their dashboard.
+              </p>
+              <div className="grid gap-2 md:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="block text-xs text-stone-600">Type</label>
+                  <select
+                    value={newTransactionType}
+                    onChange={(event) =>
+                      setNewTransactionType(event.target.value as CustomerTransaction["type"])
+                    }
+                    className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="renewal">Renewal</option>
+                    <option value="payment">Payment</option>
+                    <option value="other">Other</option>
+                  </select>
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-xs text-stone-600">Date</label>
+                  <input
+                    type="date"
+                    value={newTransactionDate}
+                    onChange={(event) => setNewTransactionDate(event.target.value)}
+                    className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+              <div className="grid gap-2 md:grid-cols-2">
+                <div className="space-y-2">
+                  <label className="block text-xs text-stone-600">Amount (optional)</label>
+                  <input
+                    type="number"
+                    min={0}
+                    value={newTransactionAmount}
+                    onChange={(event) => setNewTransactionAmount(event.target.value)}
+                    placeholder="INR"
+                    className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="block text-xs text-stone-600">Description (optional)</label>
+                  <input
+                    type="text"
+                    value={newTransactionDescription}
+                    onChange={(event) => setNewTransactionDescription(event.target.value)}
+                    placeholder="e.g. Year 2 renewal payment"
+                    className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleAddTransaction}
+                  disabled={savingTransaction || !newTransactionDate}
+                  className="inline-flex items-center rounded-lg bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
+                >
+                  {savingTransaction ? "Adding…" : "Add transaction entry"}
+                </button>
+                {transactionSuccess && (
+                  <p className="text-xs text-emerald-700">{transactionSuccess}</p>
+                )}
+                {transactionError && (
+                  <p className="text-xs text-red-600">{transactionError}</p>
+                )}
+              </div>
+              <div className="mt-2 max-h-48 overflow-y-auto border-t border-stone-100 pt-2 space-y-1">
+                {loadingTransactions ? (
+                  <p className="text-xs text-stone-500">Loading transactions…</p>
+                ) : transactions.length === 0 ? (
+                  <p className="text-xs text-stone-500">No transaction entries yet.</p>
+                ) : (
+                  transactions.map((tx) => (
+                    <div
+                      key={tx.id}
+                      className="flex items-start justify-between gap-3 rounded-lg bg-stone-50 px-3 py-2"
+                    >
+                      <div className="space-y-0.5">
+                        <p className="text-xs font-medium text-stone-800 capitalize">
+                          {tx.type}
+                        </p>
+                        <p className="text-[11px] text-stone-500">
+                          {new Date(tx.date).toLocaleDateString("en-IN")}
+                        </p>
+                        {tx.description && (
+                          <p className="text-[11px] text-stone-600">{tx.description}</p>
+                        )}
+                      </div>
+                      <div className="text-xs font-semibold text-stone-900 whitespace-nowrap">
+                        {tx.amount != null ? `₹${Number(tx.amount).toLocaleString("en-IN")}` : "—"}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
             {(customer?.last_contacted_at || customer?.next_follow_up_at) && (
                <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
