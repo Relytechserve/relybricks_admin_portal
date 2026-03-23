@@ -6,7 +6,7 @@ import { createClient } from "@supabase/supabase-js";
 type Payload = {
   type: "renewal" | "payment" | "other";
   date: string;
-  amount?: number | null;
+  amount?: number | string | null;
   description?: string | null;
   edit_reason: string;
 };
