@@ -96,6 +96,7 @@ type CustomerTransaction = {
   amount: number | null;
   description: string | null;
   date: string;
+  last_edit_reason?: string | null;
 };
 
  function formatDate(value: string | null) {
@@ -193,6 +194,14 @@ function joinName(title: string, first: string, last: string): string {
   const [newTransactionDescription, setNewTransactionDescription] = useState("");
   const [savingTransaction, setSavingTransaction] = useState(false);
   const [transactionSuccess, setTransactionSuccess] = useState<string | null>(null);
+  const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
+  const [editTxType, setEditTxType] = useState<CustomerTransaction["type"]>("renewal");
+  const [editTxDate, setEditTxDate] = useState("");
+  const [editTxAmount, setEditTxAmount] = useState("");
+  const [editTxDescription, setEditTxDescription] = useState("");
+  const [editTxReason, setEditTxReason] = useState("");
+  const [savingEditTx, setSavingEditTx] = useState(false);
+  const [editTxError, setEditTxError] = useState<string | null>(null);
 
    const id = params?.id;
 
@@ -341,7 +350,7 @@ function joinName(title: string, first: string, last: string): string {
       }
       const { data: transactionData, error: transactionLoadError } = await supabase
         .from("transactions")
-        .select("id, type, amount, description, date")
+        .select("id, type, amount, description, date, last_edit_reason")
         .eq("customer_id", id)
         .order("date", { ascending: false });
       if (transactionLoadError) {
@@ -698,35 +707,125 @@ function joinName(title: string, first: string, last: string): string {
     setSavingTransaction(true);
     setTransactionError(null);
     setTransactionSuccess(null);
-    const supabase = createClient();
     const amount =
-      newTransactionAmount.trim() === "" ? null : Number(newTransactionAmount.trim());
+      newTransactionAmount.trim() === ""
+        ? null
+        : Number(newTransactionAmount.trim());
 
-    const { data, error } = await supabase
-      .from("transactions")
-      .insert({
-        customer_id: id,
-        type: newTransactionType,
-        amount,
-        description: newTransactionDescription.trim() || null,
-        date: newTransactionDate,
-      })
-      .select("id, type, amount, description, date")
-      .single();
+    try {
+      const res = await fetch(`/api/customers/${id}/transactions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: newTransactionType,
+          date: newTransactionDate,
+          amount: amount != null && !Number.isNaN(amount) ? amount : null,
+          description: newTransactionDescription.trim() || null,
+        }),
+      });
+      const result = (await res.json()) as {
+        data?: CustomerTransaction;
+        nextRenewalDate?: string | null;
+        error?: string;
+      };
 
-    setSavingTransaction(false);
-    if (error || !data) {
+      if (!res.ok) {
+        setTransactionError(result.error ?? "Failed to add transaction.");
+        return;
+      }
+
+      if (result.data) {
+        setTransactions((prev) => [result.data as CustomerTransaction, ...prev]);
+        setTransactionSuccess("Transaction added.");
+        setNewTransactionType("renewal");
+        setNewTransactionAmount("");
+        setNewTransactionDescription("");
+        setNewTransactionDate(new Date().toISOString().slice(0, 10));
+        if (result.nextRenewalDate && form) {
+          setForm({ ...form, next_renewal_date: result.nextRenewalDate });
+          setCustomer((c) =>
+            c ? { ...c, next_renewal_date: result.nextRenewalDate! } : c,
+          );
+        }
+        setTimeout(() => setTransactionSuccess(null), 3000);
+      } else {
+        setTransactionError("Failed to add transaction.");
+      }
+    } catch {
       setTransactionError("Failed to add transaction.");
+    } finally {
+      setSavingTransaction(false);
+    }
+  }
+
+  function openEditTransaction(tx: CustomerTransaction) {
+    setEditingTransactionId(tx.id);
+    setEditTxType(tx.type);
+    setEditTxDate(tx.date);
+    setEditTxAmount(tx.amount != null ? String(tx.amount) : "");
+    setEditTxDescription(tx.description ?? "");
+    setEditTxReason("");
+    setEditTxError(null);
+  }
+
+  function cancelEditTransaction() {
+    setEditingTransactionId(null);
+    setEditTxError(null);
+  }
+
+  async function handleEditTransaction() {
+    if (!id || !editingTransactionId || !editTxDate) return;
+    if (!editTxReason.trim()) {
+      setEditTxError("Edit reason is required.");
       return;
     }
-
-    setTransactions((prev) => [data as unknown as CustomerTransaction, ...prev]);
-    setTransactionSuccess("Transaction added.");
-    setNewTransactionType("renewal");
-    setNewTransactionAmount("");
-    setNewTransactionDescription("");
-    setNewTransactionDate(new Date().toISOString().slice(0, 10));
-    setTimeout(() => setTransactionSuccess(null), 3000);
+    setSavingEditTx(true);
+    setEditTxError(null);
+    try {
+      const amount =
+        editTxAmount.trim() === ""
+          ? null
+          : Number(editTxAmount.trim());
+      const res = await fetch(
+        `/api/customers/${id}/transactions/${editingTransactionId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            type: editTxType,
+            date: editTxDate,
+            amount: amount != null && !Number.isNaN(amount) ? amount : null,
+            description: editTxDescription.trim() || null,
+            edit_reason: editTxReason.trim(),
+          }),
+        },
+      );
+      const result = (await res.json()) as {
+        data?: CustomerTransaction;
+        nextRenewalDate?: string | null;
+        error?: string;
+      };
+      if (!res.ok) {
+        setEditTxError(result.error ?? "Failed to update transaction.");
+        return;
+      }
+      if (result.data) {
+        setTransactions((prev) =>
+          prev.map((t) => (t.id === editingTransactionId ? result.data! : t)),
+        );
+        if (result.nextRenewalDate && form) {
+          setForm({ ...form, next_renewal_date: result.nextRenewalDate });
+          setCustomer((c) =>
+            c ? { ...c, next_renewal_date: result.nextRenewalDate! } : c,
+          );
+        }
+        cancelEditTransaction();
+      }
+    } catch {
+      setEditTxError("Failed to update transaction.");
+    } finally {
+      setSavingEditTx(false);
+    }
   }
 
    return (
@@ -1441,7 +1540,8 @@ function joinName(title: string, first: string, last: string): string {
               </div>
               <p className="text-xs text-stone-500">
                 Log when renewal payments or other billing events are completed. These entries are
-                visible to the customer in their dashboard.
+                visible to the customer in their dashboard. Adding a Renewal automatically sets the
+                next subscription renewal date to one year from the renewal date.
               </p>
               <div className="grid gap-2 md:grid-cols-2">
                 <div className="space-y-2">
@@ -1507,31 +1607,133 @@ function joinName(title: string, first: string, last: string): string {
                   <p className="text-xs text-red-600">{transactionError}</p>
                 )}
               </div>
-              <div className="mt-2 max-h-48 overflow-y-auto border-t border-stone-100 pt-2 space-y-1">
+              <div className="mt-2 max-h-80 overflow-y-auto border-t border-stone-100 pt-2 space-y-1">
                 {loadingTransactions ? (
                   <p className="text-xs text-stone-500">Loading transactions…</p>
                 ) : transactions.length === 0 ? (
                   <p className="text-xs text-stone-500">No transaction entries yet.</p>
                 ) : (
                   transactions.map((tx) => (
-                    <div
-                      key={tx.id}
-                      className="flex items-start justify-between gap-3 rounded-lg bg-stone-50 px-3 py-2"
-                    >
-                      <div className="space-y-0.5">
-                        <p className="text-xs font-medium text-stone-800 capitalize">
-                          {tx.type}
-                        </p>
-                        <p className="text-[11px] text-stone-500">
-                          {new Date(tx.date).toLocaleDateString("en-IN")}
-                        </p>
-                        {tx.description && (
-                          <p className="text-[11px] text-stone-600">{tx.description}</p>
-                        )}
-                      </div>
-                      <div className="text-xs font-semibold text-stone-900 whitespace-nowrap">
-                        {tx.amount != null ? `₹${Number(tx.amount).toLocaleString("en-IN")}` : "—"}
-                      </div>
+                    <div key={tx.id} className="space-y-1">
+                      {editingTransactionId === tx.id ? (
+                        <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-3 space-y-2">
+                          <p className="text-xs font-medium text-stone-700">Edit transaction</p>
+                          <div className="grid gap-2 md:grid-cols-2">
+                            <div>
+                              <label className="block text-[11px] text-stone-600">Type</label>
+                              <select
+                                value={editTxType}
+                                onChange={(e) =>
+                                  setEditTxType(e.target.value as CustomerTransaction["type"])
+                                }
+                                className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+                              >
+                                <option value="renewal">Renewal</option>
+                                <option value="payment">Payment</option>
+                                <option value="other">Other</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-stone-600">Date</label>
+                              <input
+                                type="date"
+                                value={editTxDate}
+                                onChange={(e) => setEditTxDate(e.target.value)}
+                                className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+                              />
+                            </div>
+                          </div>
+                          <div className="grid gap-2 md:grid-cols-2">
+                            <div>
+                              <label className="block text-[11px] text-stone-600">Amount (optional)</label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={editTxAmount}
+                                onChange={(e) => setEditTxAmount(e.target.value)}
+                                className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+                              />
+                            </div>
+                            <div>
+                              <label className="block text-[11px] text-stone-600">Description (optional)</label>
+                              <input
+                                type="text"
+                                value={editTxDescription}
+                                onChange={(e) => setEditTxDescription(e.target.value)}
+                                placeholder="e.g. Year 2 renewal payment"
+                                className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+                              />
+                            </div>
+                          </div>
+                          <div>
+                            <label className="block text-[11px] text-stone-600">
+                              Reason for edit <span className="text-red-600">*</span>
+                            </label>
+                            <input
+                              type="text"
+                              value={editTxReason}
+                              onChange={(e) => {
+                                setEditTxReason(e.target.value);
+                                setEditTxError(null);
+                              }}
+                              placeholder="e.g. Corrected amount entry"
+                              className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+                            />
+                          </div>
+                          {editTxError && (
+                            <p className="text-xs text-red-600">{editTxError}</p>
+                          )}
+                          <div className="flex gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={handleEditTransaction}
+                              disabled={savingEditTx}
+                              className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-60"
+                            >
+                              {savingEditTx ? "Saving…" : "Save changes"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={cancelEditTransaction}
+                              disabled={savingEditTx}
+                              className="rounded border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-50"
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex items-start justify-between gap-3 rounded-lg bg-stone-50 px-3 py-2">
+                          <div className="space-y-0.5">
+                            <p className="text-xs font-medium text-stone-800 capitalize">
+                              {tx.type}
+                            </p>
+                            <p className="text-[11px] text-stone-500">
+                              {new Date(tx.date).toLocaleDateString("en-IN")}
+                            </p>
+                            {tx.description && (
+                              <p className="text-[11px] text-stone-600">{tx.description}</p>
+                            )}
+                            {tx.last_edit_reason && (
+                              <p className="text-[10px] text-amber-700 italic">
+                                Edited: {tx.last_edit_reason}
+                              </p>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-semibold text-stone-900 whitespace-nowrap">
+                              {tx.amount != null ? `₹${Number(tx.amount).toLocaleString("en-IN")}` : "—"}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => openEditTransaction(tx)}
+                              className="text-xs text-blue-600 hover:underline shrink-0"
+                            >
+                              Edit
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
