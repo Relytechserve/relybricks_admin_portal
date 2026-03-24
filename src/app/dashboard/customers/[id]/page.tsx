@@ -5,6 +5,7 @@
  import { useParams, useRouter } from "next/navigation";
  import { createClient } from "@/lib/supabase";
  import { logClientAdminActivity } from "@/lib/client-admin-activity";
+ import { syncCustomerSubscriptionMirrorFromProperties } from "@/lib/sync-customer-subscription-mirror";
 
  type Customer = {
    id: string;
@@ -53,6 +54,11 @@
    property_sqft: number | null;
    property_bhk: string | null;
    property_furnishing: string | null;
+   subscription_tier_id?: string | null;
+   plan_type?: string | null;
+   subscription_date?: string | null;
+   next_renewal_date?: string | null;
+   package_revenue?: number | null;
  };
 
  type PropertyDocument = {
@@ -98,6 +104,7 @@ type CustomerTransaction = {
   description: string | null;
   date: string;
   last_edit_reason?: string | null;
+  customer_property_id?: string | null;
 };
 
  function formatDate(value: string | null) {
@@ -193,6 +200,7 @@ function joinName(title: string, first: string, last: string): string {
   const [newTransactionAmount, setNewTransactionAmount] = useState("");
   const [newTransactionDate, setNewTransactionDate] = useState("");
   const [newTransactionDescription, setNewTransactionDescription] = useState("");
+  const [newTransactionPropertyId, setNewTransactionPropertyId] = useState("");
   const [savingTransaction, setSavingTransaction] = useState(false);
   const [transactionSuccess, setTransactionSuccess] = useState<string | null>(null);
   const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
@@ -293,7 +301,9 @@ function joinName(title: string, first: string, last: string): string {
 
       const { data: propsData, error: propsError } = await supabase
         .from("customer_properties")
-        .select("id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing")
+        .select(
+          "id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing, subscription_tier_id, plan_type, subscription_date, next_renewal_date, package_revenue",
+        )
         .eq("customer_id", id)
         .order("created_at", { ascending: true });
 
@@ -351,7 +361,7 @@ function joinName(title: string, first: string, last: string): string {
       }
       const { data: transactionData, error: transactionLoadError } = await supabase
         .from("transactions")
-        .select("id, type, amount, description, date, last_edit_reason")
+        .select("id, type, amount, description, date, last_edit_reason, customer_property_id")
         .eq("customer_id", id)
         .order("date", { ascending: false });
       if (transactionLoadError) {
@@ -400,10 +410,17 @@ function joinName(title: string, first: string, last: string): string {
      [form?.outstanding_amount],
    );
 
-  const activeTiers = useMemo(
-    () => tiers.filter((t) => t.is_active || t.id === form?.subscription_tier_id),
-    [tiers, form?.subscription_tier_id],
-  );
+  function tiersForPropertySelect(prop: CustomerProperty) {
+    return tiers.filter((t) => t.is_active || t.id === prop.subscription_tier_id);
+  }
+
+  function propertyTransactionLabel(propertyId: string | null | undefined) {
+    if (!propertyId) return "All properties (legacy)";
+    const p = properties.find((x) => x.id === propertyId);
+    if (!p) return "Property";
+    const bit = p.city?.trim() || p.area?.trim() || p.full_address?.trim()?.slice(0, 36);
+    return bit ? bit : "Property";
+  }
 
   function findTierPriceForCustomer(
     tierId: string | null | undefined,
@@ -456,20 +473,6 @@ function joinName(title: string, first: string, last: string): string {
     const lifecycleStage = computeLifecycleStage(form);
     const fullName = joinName(nameTitle, nameFirst, nameLast) || form.name;
 
-    if (form.subscription_tier_id && !tiers.length) {
-      setSaveError("Subscription tiers are still loading. Please try again.");
-      setSaving(false);
-      return;
-    }
-
-    if (form.subscription_tier_id && !findTierPriceForCustomer(form.subscription_tier_id, form.property_city)) {
-      setSaveError(
-        "Selected subscription tier does not have a price for this customer's city. Please add a city price or use a custom tier.",
-      );
-      setSaving(false);
-      return;
-    }
-
      const supabase = createClient();
 
      const { error: updateError } = await supabase
@@ -481,15 +484,10 @@ function joinName(title: string, first: string, last: string): string {
          whatsapp: form.whatsapp,
          preferred_contact: form.preferred_contact,
          status: form.status,
-         plan_type: form.plan_type,
-         subscription_tier_id: form.subscription_tier_id ?? null,
          source: form.source,
          segment: form.segment,
          lifecycle_stage: lifecycleStage,
-         subscription_date: form.subscription_date,
-         next_renewal_date: form.next_renewal_date,
          renewal_status: form.renewal_status,
-         package_revenue: form.package_revenue,
          billed_amount: form.billed_amount,
          outstanding_amount: form.outstanding_amount,
          payment_status: form.payment_status,
@@ -525,10 +523,10 @@ function joinName(title: string, first: string, last: string): string {
     });
    }
 
-   function updatePropertyField(
+   function updatePropertyField<K extends keyof CustomerProperty>(
      propId: string,
-     key: keyof CustomerProperty,
-     value: string | number | null,
+     key: K,
+     value: CustomerProperty[K],
    ) {
      setProperties((prev) =>
        prev.map((p) => (p.id === propId ? { ...p, [key]: value } : p)),
@@ -541,7 +539,9 @@ function joinName(title: string, first: string, last: string): string {
      const { data, error } = await supabase
        .from("customer_properties")
        .insert({ customer_id: id })
-       .select("id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing")
+       .select(
+         "id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing, subscription_tier_id, plan_type, subscription_date, next_renewal_date, package_revenue",
+       )
        .single();
      if (error) return;
      setProperties((prev) => [...prev, data as unknown as CustomerProperty]);
@@ -558,6 +558,23 @@ function joinName(title: string, first: string, last: string): string {
      setPropertySaveError(null);
      setPropertySaveSuccess(false);
      const supabase = createClient();
+
+     if (prop.subscription_tier_id && !tiers.length) {
+       setPropertySaveError("Subscription tiers are still loading. Please try again.");
+       setPropertySavingId(null);
+       return;
+     }
+     if (
+       prop.subscription_tier_id &&
+       !findTierPriceForCustomer(prop.subscription_tier_id, prop.city)
+     ) {
+       setPropertySaveError(
+         "This tier has no price for this property’s city. Add a city price or pick a custom tier.",
+       );
+       setPropertySavingId(null);
+       return;
+     }
+
      const { error } = await supabase
        .from("customer_properties")
        .update({
@@ -569,12 +586,39 @@ function joinName(title: string, first: string, last: string): string {
          property_sqft: prop.property_sqft ?? null,
          property_bhk: prop.property_bhk || null,
          property_furnishing: prop.property_furnishing || null,
+         subscription_tier_id: prop.subscription_tier_id ?? null,
+         plan_type: prop.plan_type || null,
+         subscription_date: prop.subscription_date || null,
+         next_renewal_date: prop.next_renewal_date || null,
+         package_revenue: prop.package_revenue ?? null,
        })
        .eq("id", prop.id);
      setPropertySavingId(null);
      if (error) {
        setPropertySaveError("Failed to save property.");
        return;
+     }
+     if (id) {
+       await syncCustomerSubscriptionMirrorFromProperties(supabase, id);
+       const { data: rolled } = await supabase
+         .from("customers")
+         .select(
+           "plan_type, subscription_tier_id, next_renewal_date, subscription_date, package_revenue",
+         )
+         .eq("id", id)
+         .maybeSingle();
+       if (rolled && form) {
+         const r = rolled as Pick<
+           Customer,
+           | "plan_type"
+           | "subscription_tier_id"
+           | "next_renewal_date"
+           | "subscription_date"
+           | "package_revenue"
+         >;
+         setForm((f) => (f ? { ...f, ...r } : f));
+         setCustomer((c) => (c ? { ...c, ...r } : c));
+       }
      }
      setPropertySaveSuccess(true);
      setPropertySaveError(null);
@@ -762,6 +806,7 @@ function joinName(title: string, first: string, last: string): string {
       newTransactionAmount.trim() === ""
         ? null
         : Number(newTransactionAmount.trim());
+    const propertyIdForTx = newTransactionPropertyId.trim();
 
     try {
       const res = await fetch(`/api/customers/${id}/transactions`, {
@@ -772,6 +817,7 @@ function joinName(title: string, first: string, last: string): string {
           date: newTransactionDate,
           amount: amount != null && !Number.isNaN(amount) ? amount : null,
           description: newTransactionDescription.trim() || null,
+          customer_property_id: propertyIdForTx || null,
         }),
       });
       const result = (await res.json()) as {
@@ -791,12 +837,24 @@ function joinName(title: string, first: string, last: string): string {
         setNewTransactionType("renewal");
         setNewTransactionAmount("");
         setNewTransactionDescription("");
+        setNewTransactionPropertyId("");
         setNewTransactionDate(new Date().toISOString().slice(0, 10));
-        if (result.nextRenewalDate && form) {
-          setForm({ ...form, next_renewal_date: result.nextRenewalDate });
-          setCustomer((c) =>
-            c ? { ...c, next_renewal_date: result.nextRenewalDate! } : c,
-          );
+        if (result.nextRenewalDate) {
+          if (propertyIdForTx) {
+            setProperties((prev) =>
+              prev.map((p) =>
+                p.id === propertyIdForTx
+                  ? { ...p, next_renewal_date: result.nextRenewalDate! }
+                  : p,
+              ),
+            );
+          }
+          if (form) {
+            setForm({ ...form, next_renewal_date: result.nextRenewalDate });
+            setCustomer((c) =>
+              c ? { ...c, next_renewal_date: result.nextRenewalDate! } : c,
+            );
+          }
         }
         setTimeout(() => setTransactionSuccess(null), 3000);
       } else {
@@ -864,11 +922,21 @@ function joinName(title: string, first: string, last: string): string {
         setTransactions((prev) =>
           prev.map((t) => (t.id === editingTransactionId ? result.data! : t)),
         );
-        if (result.nextRenewalDate && form) {
-          setForm({ ...form, next_renewal_date: result.nextRenewalDate });
-          setCustomer((c) =>
-            c ? { ...c, next_renewal_date: result.nextRenewalDate! } : c,
-          );
+        if (result.nextRenewalDate) {
+          const pid = result.data.customer_property_id;
+          if (pid) {
+            setProperties((prev) =>
+              prev.map((p) =>
+                p.id === pid ? { ...p, next_renewal_date: result.nextRenewalDate! } : p,
+              ),
+            );
+          }
+          if (form) {
+            setForm({ ...form, next_renewal_date: result.nextRenewalDate });
+            setCustomer((c) =>
+              c ? { ...c, next_renewal_date: result.nextRenewalDate! } : c,
+            );
+          }
         }
         cancelEditTransaction();
       }
@@ -1266,6 +1334,121 @@ function joinName(title: string, first: string, last: string): string {
                              className="w-24 rounded-lg border border-stone-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
                            />
                          </div>
+                         <div className="mt-3 pt-3 border-t border-stone-200 space-y-2">
+                           <p className="text-xs font-medium text-stone-600">
+                             Subscription (this property)
+                           </p>
+                           <select
+                             value={prop.subscription_tier_id ?? ""}
+                             onChange={(e) => {
+                               const value = e.target.value || null;
+                               const tier = tiers.find((t) => t.id === value) || null;
+                               setProperties((prev) =>
+                                 prev.map((p) => {
+                                   if (p.id !== prop.id) return p;
+                                   const next: CustomerProperty = {
+                                     ...p,
+                                     subscription_tier_id: value,
+                                     plan_type: tier ? tier.name : null,
+                                   };
+                                   const price = tier
+                                     ? findTierPriceForCustomer(tier.id, p.city)
+                                     : null;
+                                   if (price) next.package_revenue = Number(price.amount);
+                                   return next;
+                                 }),
+                               );
+                             }}
+                             className="w-full max-w-md rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           >
+                             <option value="">Subscription tier</option>
+                             {tiersForPropertySelect(prop).map((tier) => (
+                               <option key={tier.id} value={tier.id}>
+                                 {tier.name}
+                                 {!tier.is_active ? " (inactive)" : ""}
+                               </option>
+                             ))}
+                           </select>
+                           {prop.subscription_tier_id && (
+                             <p className="text-[11px] text-stone-500">
+                               {prop.plan_type ?? "Plan"}{" "}
+                               {findTierPriceForCustomer(prop.subscription_tier_id, prop.city)
+                                 ? `• ₹${Number(
+                                     findTierPriceForCustomer(
+                                       prop.subscription_tier_id,
+                                       prop.city,
+                                     )?.amount ?? 0,
+                                   ).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
+                                 : "• No city price for this tier"}
+                             </p>
+                           )}
+                           <div className="grid grid-cols-2 gap-2">
+                             <div>
+                               <label className="text-[11px] text-stone-500">Start date</label>
+                               <input
+                                 type="date"
+                                 value={prop.subscription_date ?? ""}
+                                 onChange={(e) =>
+                                   updatePropertyField(
+                                     prop.id,
+                                     "subscription_date",
+                                     e.target.value || null,
+                                   )
+                                 }
+                                 className="mt-0.5 w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               />
+                             </div>
+                             <div>
+                               <label className="text-[11px] text-stone-500">Next renewal</label>
+                               <input
+                                 type="date"
+                                 value={prop.next_renewal_date ?? ""}
+                                 onChange={(e) =>
+                                   updatePropertyField(
+                                     prop.id,
+                                     "next_renewal_date",
+                                     e.target.value || null,
+                                   )
+                                 }
+                                 className="mt-0.5 w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                               />
+                             </div>
+                           </div>
+                           {prop.subscription_date && (
+                             <button
+                               type="button"
+                               onClick={() => {
+                                 const start = new Date(prop.subscription_date!);
+                                 const next = new Date(start);
+                                 next.setFullYear(next.getFullYear() + 1);
+                                 updatePropertyField(
+                                   prop.id,
+                                   "next_renewal_date",
+                                   next.toISOString().slice(0, 10),
+                                 );
+                               }}
+                               className="rounded-lg border border-stone-300 bg-white px-2 py-1 text-[11px] font-medium text-stone-700 hover:bg-stone-50"
+                             >
+                               Next renewal = 1 year from start
+                             </button>
+                           )}
+                           <div>
+                             <label className="text-[11px] text-stone-500">Annual package revenue (₹)</label>
+                             <input
+                               type="number"
+                               min={0}
+                               value={prop.package_revenue ?? ""}
+                               onChange={(e) =>
+                                 updatePropertyField(
+                                   prop.id,
+                                   "package_revenue",
+                                   e.target.value === "" ? null : Number(e.target.value),
+                                 )
+                               }
+                               className="mt-0.5 w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             />
+                           </div>
+                         </div>
                          <div className="flex gap-2 pt-1">
                            <button
                              type="button"
@@ -1393,16 +1576,15 @@ function joinName(title: string, first: string, last: string): string {
            </div>
            <div className="space-y-4">
               <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
+               <p className="text-xs text-stone-500">
+                 Plan, start date, next renewal, and package revenue are stored per property (left).
+                 This panel shows a rolled-up copy for customer-level reports and legacy integrations.
+               </p>
                <div>
-                 <p className="text-sm text-stone-500">Subscription start date</p>
-                 <input
-                   type="date"
-                   value={form.subscription_date ?? ""}
-                   onChange={(event) =>
-                     updateField("subscription_date", event.target.value || null)
-                   }
-                   className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 />
+                 <p className="text-sm text-stone-500">Rolled-up subscription start</p>
+                 <p className="mt-1 text-sm font-medium text-stone-900">
+                   {formatDate(form.subscription_date ?? null) ?? "Not set"}
+                 </p>
                  <select
                    value={form.renewal_status ?? ""}
                    onChange={(event) =>
@@ -1429,105 +1611,31 @@ function joinName(title: string, first: string, last: string): string {
                )}
              </div>
              <div className="bg-white rounded-xl border border-stone-200 p-4">
-               <p className="text-sm text-stone-500">Next subscription renewal date</p>
-               <p className="mt-0.5 text-xs text-stone-500">Yearly subscription</p>
+               <p className="text-sm text-stone-500">Next renewal (earliest across properties)</p>
+               <p className="mt-0.5 text-xs text-stone-500">Yearly subscription per property</p>
                <p className="mt-1 text-base font-semibold text-stone-900">
                  {formattedRenewalDate ?? "Not scheduled"}
                </p>
-               <div className="mt-2 flex flex-wrap items-center gap-2">
-                 <input
-                   type="date"
-                   value={form.next_renewal_date ?? ""}
-                   onChange={(event) =>
-                     updateField(
-                       "next_renewal_date",
-                       event.target.value || null,
-                     )
-                   }
-                   className="rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 />
-                 {form.subscription_date && (
-                   <button
-                     type="button"
-                     onClick={() => {
-                       const start = new Date(form!.subscription_date!);
-                       const next = new Date(start);
-                       next.setFullYear(next.getFullYear() + 1);
-                       updateField(
-                         "next_renewal_date",
-                         next.toISOString().slice(0, 10),
-                       );
-                     }}
-                     className="rounded-lg border border-stone-300 bg-white px-3 py-2 text-xs font-medium text-stone-700 hover:bg-stone-50"
-                   >
-                     Set to 1 year from start
-                   </button>
-                 )}
-               </div>
+               <p className="mt-2 text-xs text-stone-500">
+                 Edit each property’s dates on the left, or log a renewal and link it to that property.
+               </p>
              </div>
             <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
               <div>
-                <p className="text-sm text-stone-500">Subscription tier</p>
-                <select
-                  value={form.subscription_tier_id ?? ""}
-                  onChange={(event) => {
-                    const value = event.target.value || null;
-                    const tier = activeTiers.find((t) => t.id === value) || null;
-                    const updated: Customer = {
-                      ...form,
-                      subscription_tier_id: value,
-                      plan_type: tier ? tier.name : form.plan_type,
-                    };
-                    const price = tier
-                      ? findTierPriceForCustomer(tier.id, form.property_city)
-                      : null;
-                    if (price) {
-                      updated.package_revenue = Number(price.amount);
-                    }
-                    setForm(updated);
-                    setSaveSuccess(false);
-                    setSaveError(null);
-                  }}
-                  className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Not set</option>
-                  {activeTiers.map((tier) => (
-                    <option key={tier.id} value={tier.id}>
-                      {tier.name}
-                      {!tier.is_active ? " (inactive)" : ""}
-                    </option>
-                  ))}
-                </select>
-                {form.subscription_tier_id && (
-                  <p className="mt-1 text-xs text-stone-500">
-                    Plan: {form.plan_type ?? "Not set"}{" "}
-                    {findTierPriceForCustomer(form.subscription_tier_id, form.property_city)
-                      ? `• ₹${Number(
-                          findTierPriceForCustomer(form.subscription_tier_id, form.property_city)?.amount ?? 0,
-                        ).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
-                      : "• No city price configured"}
-                  </p>
-                )}
+                <p className="text-sm text-stone-500">Rolled-up plan</p>
+                <p className="mt-1 text-sm font-medium text-stone-900">
+                  {form.plan_type ?? "Not set"}
+                </p>
+                <p className="mt-1 text-xs text-stone-500">
+                  Primary tier is taken from the first property that has a tier (by creation order).
+                </p>
               </div>
               <div>
-                <p className="text-sm text-stone-500">Annual package revenue</p>
+                <p className="text-sm text-stone-500">Total annual package revenue</p>
                 <p className="mt-1 text-base font-semibold text-stone-900">
                   {formattedPackageRevenue ?? "Not set"}
                 </p>
-                <input
-                  type="number"
-                  min={0}
-                  value={form.package_revenue ?? ""}
-                  onChange={(event) =>
-                    updateField(
-                      "package_revenue",
-                      event.target.value === ""
-                        ? null
-                        : Number(event.target.value),
-                    )
-                  }
-                  className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
+                <p className="mt-1 text-xs text-stone-500">Sum of each property’s annual package revenue.</p>
               </div>
                <div>
                  <p className="text-sm text-stone-500">Outstanding amount</p>
@@ -1591,9 +1699,25 @@ function joinName(title: string, first: string, last: string): string {
               </div>
               <p className="text-xs text-stone-500">
                 Log when renewal payments or other billing events are completed. These entries are
-                visible to the customer in their dashboard. Adding a Renewal automatically sets the
-                next subscription renewal date to one year from the renewal date.
+                visible to the customer in their dashboard. For a renewal, pick a property to move
+                that property’s next renewal forward by one year; leave property blank only for legacy
+                customer-level renewals.
               </p>
+              <div className="space-y-2">
+                <label className="block text-xs text-stone-600">Property (optional)</label>
+                <select
+                  value={newTransactionPropertyId}
+                  onChange={(event) => setNewTransactionPropertyId(event.target.value)}
+                  className="w-full max-w-md rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="">All properties (legacy customer renewal)</option>
+                  {properties.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {propertyTransactionLabel(p.id)}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div className="grid gap-2 md:grid-cols-2">
                 <div className="space-y-2">
                   <label className="block text-xs text-stone-600">Type</label>
@@ -1669,6 +1793,12 @@ function joinName(title: string, first: string, last: string): string {
                       {editingTransactionId === tx.id ? (
                         <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-3 space-y-2">
                           <p className="text-xs font-medium text-stone-700">Edit transaction</p>
+                          <p className="text-[11px] text-stone-600">
+                            Property:{" "}
+                            <span className="font-medium text-stone-800">
+                              {propertyTransactionLabel(tx.customer_property_id)}
+                            </span>
+                          </p>
                           <div className="grid gap-2 md:grid-cols-2">
                             <div>
                               <label className="block text-[11px] text-stone-600">Type</label>
@@ -1758,6 +1888,9 @@ function joinName(title: string, first: string, last: string): string {
                           <div className="space-y-0.5">
                             <p className="text-xs font-medium text-stone-800 capitalize">
                               {tx.type}
+                            </p>
+                            <p className="text-[10px] text-stone-500">
+                              {propertyTransactionLabel(tx.customer_property_id)}
                             </p>
                             <p className="text-[11px] text-stone-500">
                               {new Date(tx.date).toLocaleDateString("en-IN")}

@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
+import { refreshCustomerNextRenewalFromProperties } from "@/lib/customer-renewal-mirror";
 import { recordAdminActivity } from "@/lib/record-admin-activity";
 
 type Payload = {
@@ -140,6 +141,13 @@ export async function PATCH(
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  const { data: existingTx } = await serviceClient
+    .from("transactions")
+    .select("customer_property_id")
+    .eq("id", txId)
+    .eq("customer_id", customerId)
+    .maybeSingle();
+
   const { data, error } = await serviceClient
     .from("transactions")
     .update({
@@ -152,7 +160,7 @@ export async function PATCH(
     })
     .eq("id", txId)
     .eq("customer_id", customerId)
-    .select("id, type, amount, description, date, last_edit_reason")
+    .select("id, type, amount, description, date, last_edit_reason, customer_property_id")
     .single();
 
   if (error) {
@@ -170,16 +178,28 @@ export async function PATCH(
     );
   }
 
+  const propertyId = (existingTx as { customer_property_id?: string | null } | null)
+    ?.customer_property_id;
+
   let nextRenewalDate: string | null = null;
   if (type === "renewal" && date) {
     const renewalDate = new Date(date);
     if (!Number.isNaN(renewalDate.getTime())) {
       renewalDate.setFullYear(renewalDate.getFullYear() + 1);
       nextRenewalDate = renewalDate.toISOString().slice(0, 10);
-      await serviceClient
-        .from("customers")
-        .update({ next_renewal_date: nextRenewalDate })
-        .eq("id", customerId);
+      if (propertyId) {
+        await serviceClient
+          .from("customer_properties")
+          .update({ next_renewal_date: nextRenewalDate })
+          .eq("id", propertyId)
+          .eq("customer_id", customerId);
+        await refreshCustomerNextRenewalFromProperties(serviceClient, customerId);
+      } else {
+        await serviceClient
+          .from("customers")
+          .update({ next_renewal_date: nextRenewalDate })
+          .eq("id", customerId);
+      }
     }
   }
 

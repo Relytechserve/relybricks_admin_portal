@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
+import { refreshCustomerNextRenewalFromProperties } from "@/lib/customer-renewal-mirror";
 import { recordAdminActivity } from "@/lib/record-admin-activity";
 
 type Payload = {
@@ -9,6 +10,8 @@ type Payload = {
   date: string;
   amount?: number | string | null;
   description?: string | null;
+  /** When set, renewal updates this property's next_renewal_date and rolls up to customer. */
+  customer_property_id?: string | null;
 };
 
 export async function POST(
@@ -103,6 +106,9 @@ export async function POST(
     typeof body?.description === "string" && body.description.trim()
       ? body.description.trim()
       : null;
+  const rawPropId =
+    typeof body?.customer_property_id === "string" ? body.customer_property_id.trim() : "";
+  const customerPropertyId = rawPropId || null;
 
   const validTypes = ["renewal", "payment", "other"];
   if (!type || !validTypes.includes(type)) {
@@ -123,16 +129,32 @@ export async function POST(
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  if (customerPropertyId) {
+    const { data: propRow } = await serviceClient
+      .from("customer_properties")
+      .select("id")
+      .eq("id", customerPropertyId)
+      .eq("customer_id", customerId)
+      .maybeSingle();
+    if (!propRow) {
+      return NextResponse.json(
+        { error: "Property not found for this customer." },
+        { status: 400 },
+      );
+    }
+  }
+
   const { data, error } = await serviceClient
     .from("transactions")
     .insert({
       customer_id: customerId,
+      customer_property_id: customerPropertyId,
       type,
       amount: amount != null && !Number.isNaN(amount) ? amount : null,
       description,
       date,
     })
-    .select("id, type, amount, description, date")
+    .select("id, type, amount, description, date, customer_property_id")
     .single();
 
   if (error) {
@@ -149,12 +171,24 @@ export async function POST(
     if (!Number.isNaN(renewalDate.getTime())) {
       renewalDate.setFullYear(renewalDate.getFullYear() + 1);
       nextRenewalDate = renewalDate.toISOString().slice(0, 10);
-      const { error: updateError } = await serviceClient
-        .from("customers")
-        .update({ next_renewal_date: nextRenewalDate })
-        .eq("id", customerId);
-      if (updateError) {
-        console.error("[transactions] Failed to update next_renewal_date:", updateError);
+      if (customerPropertyId) {
+        const { error: propErr } = await serviceClient
+          .from("customer_properties")
+          .update({ next_renewal_date: nextRenewalDate })
+          .eq("id", customerPropertyId)
+          .eq("customer_id", customerId);
+        if (propErr) {
+          console.error("[transactions] Failed to update property next_renewal_date:", propErr);
+        }
+        await refreshCustomerNextRenewalFromProperties(serviceClient, customerId);
+      } else {
+        const { error: updateError } = await serviceClient
+          .from("customers")
+          .update({ next_renewal_date: nextRenewalDate })
+          .eq("id", customerId);
+        if (updateError) {
+          console.error("[transactions] Failed to update next_renewal_date:", updateError);
+        }
       }
     }
   }
