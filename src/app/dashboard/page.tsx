@@ -6,6 +6,11 @@ import Link from "next/link";
 import type { PostgrestError } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase";
 import {
+  isRenewalDueWithinDays,
+  isRenewalOverdueActiveCustomer,
+  maxRenewalDateByCustomer,
+} from "@/lib/renewal-insights";
+import {
   BarChart,
   Bar,
   XAxis,
@@ -31,6 +36,7 @@ type DashboardStats = {
   totalCustomers: number;
   activeCustomers: number;
   upcomingRenewals: number;
+  renewalOverdue: number;
   totalRevenue: number;
   churnRiskCustomers: number;
   overdueCustomers: number;
@@ -66,6 +72,7 @@ export default function AdminDashboardPage() {
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [selectedMonth, setSelectedMonth] = useState<MonthData | null>(null);
+  const [maxRenewalByCustomer, setMaxRenewalByCustomer] = useState<Record<string, string>>({});
   const router = useRouter();
 
   useEffect(() => {
@@ -88,7 +95,9 @@ export default function AdminDashboardPage() {
         .from("customers")
         .select(
           "id, status, plan_type, subscription_date, next_renewal_date, package_revenue, lifecycle_stage, payment_status, outstanding_amount, created_at, name",
-        )) as { data: (CustomerSummary & { id?: string; name?: string })[] | null; error: PostgrestError | null };
+        )
+        .order("created_at", { ascending: false })
+        .limit(10000)) as { data: (CustomerSummary & { id?: string; name?: string })[] | null; error: PostgrestError | null };
 
       if (custError) {
         setError("Failed to load dashboard data.");
@@ -99,6 +108,13 @@ export default function AdminDashboardPage() {
       const list = customers ?? [];
 
       setCustomers(list);
+
+      const { data: renewalRows } = await supabase
+        .from("transactions")
+        .select("customer_id, date")
+        .eq("type", "renewal")
+        .limit(10000);
+      setMaxRenewalByCustomer(maxRenewalDateByCustomer((renewalRows ?? []) as { customer_id: string; date: string }[]));
 
       let propertiesCount = 0;
       const { count } = await supabase
@@ -114,7 +130,7 @@ export default function AdminDashboardPage() {
   }, [router]);
 
   const { stats, chartData, recentActivity } = useMemo(() => {
-    if (!customers.length || totalProperties == null) {
+    if (totalProperties == null) {
       return {
         stats: null,
         chartData: [] as MonthData[],
@@ -156,42 +172,30 @@ export default function AdminDashboardPage() {
       return true;
     };
 
-    const filtered = customers.filter((c) => {
-      const base = c.subscription_date ?? c.created_at;
-      if (!rangeStart && !rangeEnd) return true;
-      if (!base) return false;
-      const d = new Date(base);
-      return inRange(d);
-    });
-
-    const list = filtered.length ? filtered : customers;
-
-    const totalCustomers = list.length;
-    const activeCustomers = list.filter((c) => c.status === "Active").length;
-    const in30Days = new Date();
-    in30Days.setDate(today.getDate() + 30);
-    const upcomingRenewals = list.filter((c) => {
-      if (!c.next_renewal_date) return false;
-      const d = new Date(c.next_renewal_date);
-      if (!inRange(d)) return false;
-      return d >= today && d <= in30Days;
+    // Headline metrics: full customer base (date filter only affects chart + period revenue)
+    const totalCustomers = customers.length;
+    const activeCustomers = customers.filter(
+      (c) => (c.status ?? "").trim().toLowerCase() === "active",
+    ).length;
+    const upcomingRenewals = customers.filter((c) =>
+      isRenewalDueWithinDays(c.next_renewal_date ?? null, 30),
+    ).length;
+    const renewalOverdue = customers.filter((c) => {
+      const id = c.id;
+      if (!id) return false;
+      return isRenewalOverdueActiveCustomer(
+        { status: c.status, next_renewal_date: c.next_renewal_date },
+        maxRenewalByCustomer[id],
+      );
     }).length;
-    const totalRevenue = list.reduce((sum, c) => sum + (c.package_revenue ?? 0), 0);
-    const churnRiskCustomers = list.filter((c) => c.lifecycle_stage === "churn_risk").length;
-    const overdueCustomers = list.filter((c) => {
+    const churnRiskCustomers = customers.filter((c) => c.lifecycle_stage === "churn_risk").length;
+    const overdueCustomers = customers.filter((c) => {
       if (c.payment_status === "overdue") return true;
-      return (c.outstanding_amount ?? 0) > 0 && c.status === "Active";
+      return (
+        (c.outstanding_amount ?? 0) > 0 &&
+        (c.status ?? "").trim().toLowerCase() === "active"
+      );
     }).length;
-
-    const stats: DashboardStats = {
-      totalCustomers,
-      activeCustomers,
-      upcomingRenewals,
-      totalRevenue,
-      churnRiskCustomers,
-      overdueCustomers,
-      totalProperties,
-    };
 
     const byMonth: Record<number, number> = {};
     const byMonthCustomers: Record<number, MonthCustomer[]> = {};
@@ -200,25 +204,25 @@ export default function AdminDashboardPage() {
       byMonthCustomers[m] = [];
     }
 
-    list.forEach((c) => {
+    const addToMonth = (monthIndex1Based: number, c: CustomerSummary & { id?: string; name?: string }) => {
       if (!c.package_revenue || !c.id || !c.name) return;
       const amount = c.package_revenue;
+      byMonth[monthIndex1Based] += amount;
+      byMonthCustomers[monthIndex1Based].push({ id: c.id, name: c.name, amount });
+    };
 
+    customers.forEach((c) => {
       if (c.subscription_date) {
         const start = new Date(c.subscription_date);
         if (inRange(start)) {
-          const key = start.getMonth() + 1;
-          byMonth[key] += amount;
-          byMonthCustomers[key].push({ id: c.id, name: c.name, amount });
+          addToMonth(start.getMonth() + 1, c);
         }
       }
 
       if (c.next_renewal_date) {
         const renewal = new Date(c.next_renewal_date);
         if (inRange(renewal)) {
-          const key = renewal.getMonth() + 1;
-          byMonth[key] += amount;
-          byMonthCustomers[key].push({ id: c.id, name: c.name, amount });
+          addToMonth(renewal.getMonth() + 1, c);
         }
       }
     });
@@ -230,14 +234,27 @@ export default function AdminDashboardPage() {
       customers: byMonthCustomers[i + 1] ?? [],
     }));
 
-    const recentActivity: RecentActivity[] = (list as { id?: string; name?: string; created_at?: string }[])
+    const periodRevenue = chartData.reduce((sum, m) => sum + m.revenue, 0);
+
+    const stats: DashboardStats = {
+      totalCustomers,
+      activeCustomers,
+      upcomingRenewals,
+      renewalOverdue,
+      totalRevenue: periodRevenue,
+      churnRiskCustomers,
+      overdueCustomers,
+      totalProperties,
+    };
+
+    const recentActivity: RecentActivity[] = (customers as { id?: string; name?: string; created_at?: string }[])
       .filter((c) => c.id && c.name)
       .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
       .slice(0, 8)
       .map((c) => ({ id: c.id!, name: c.name!, created_at: c.created_at ?? "" }));
 
     return { stats, chartData, recentActivity };
-  }, [customers, totalProperties, datePreset, customFrom, customTo]);
+  }, [customers, totalProperties, maxRenewalByCustomer, datePreset, customFrom, customTo]);
 
   if (loading) {
     return (
@@ -271,7 +288,7 @@ export default function AdminDashboardPage() {
       bg: "bg-emerald-500",
     },
     {
-      label: "Total revenue (₹)",
+      label: "Revenue in period (₹)",
       value: stats.totalRevenue.toLocaleString("en-IN", { maximumFractionDigits: 0 }),
       icon: "revenue",
       bg: "bg-violet-500",
@@ -363,7 +380,8 @@ export default function AdminDashboardPage() {
         <div className="lg:col-span-2 bg-white rounded-xl border border-stone-200 p-4">
           <h2 className="text-base font-semibold text-stone-900">Revenue insights</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Subscription cash inflow by month —{" "}
+            Package revenue by calendar month when subscription start or next renewal falls in the
+            selected period —{" "}
             {datePreset === "week" && "last 7 days"}
             {datePreset === "month" && "this month"}
             {datePreset === "year" && "this year"}
@@ -470,7 +488,7 @@ export default function AdminDashboardPage() {
         </div>
       </div>
 
-      <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
         <div className="bg-white rounded-xl border border-amber-200 p-4">
           <p className="text-sm text-amber-700 font-medium">Churn risk</p>
           <p className="mt-1 text-2xl font-semibold text-amber-900">{stats.churnRiskCustomers}</p>
@@ -480,6 +498,19 @@ export default function AdminDashboardPage() {
           <p className="text-sm text-red-700 font-medium">Overdue / outstanding</p>
           <p className="mt-1 text-2xl font-semibold text-red-900">{stats.overdueCustomers}</p>
           <p className="mt-1 text-xs text-red-600">Requires follow-up</p>
+        </div>
+        <div className="bg-white rounded-xl border border-orange-200 p-4">
+          <p className="text-sm text-orange-800 font-medium">Renewal overdue</p>
+          <p className="mt-1 text-2xl font-semibold text-orange-900">{stats.renewalOverdue}</p>
+          <p className="mt-1 text-xs text-orange-700">
+            Active, past next renewal date, no renewal transaction on or after that date
+          </p>
+          <Link
+            href="/dashboard/customers?renewal=overdue"
+            className="text-xs text-violet-600 hover:underline mt-1 inline-block"
+          >
+            View customers →
+          </Link>
         </div>
         <div className="bg-white rounded-xl border border-stone-200 p-4">
           <p className="text-sm text-stone-500">Renewals in 30 days</p>

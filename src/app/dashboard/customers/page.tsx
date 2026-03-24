@@ -1,9 +1,14 @@
  "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
  import Link from "next/link";
- import { useRouter } from "next/navigation";
+ import { useRouter, useSearchParams } from "next/navigation";
  import { createClient } from "@/lib/supabase";
+ import {
+   isRenewalDueWithinDays,
+   isRenewalOverdueActiveCustomer,
+   maxRenewalDateByCustomer,
+ } from "@/lib/renewal-insights";
 
  type CustomerRow = {
    id: string;
@@ -67,8 +72,9 @@ type SortKey =
    return billed != null && Number(billed) > 0 ? "paid" : "unpaid";
  }
 
- export default function CustomersPage() {
+ function CustomersPageContent() {
    const [customers, setCustomers] = useState<CustomerRow[]>([]);
+   const [maxRenewalByCustomer, setMaxRenewalByCustomer] = useState<Record<string, string>>({});
    const [loading, setLoading] = useState(true);
    const [error, setError] = useState<string | null>(null);
    const [filters, setFilters] = useState<Filters>({
@@ -100,6 +106,10 @@ type SortKey =
   const [createError, setCreateError] = useState<string | null>(null);
   const [createSuccess, setCreateSuccess] = useState<string | null>(null);
    const router = useRouter();
+   const searchParams = useSearchParams();
+   const renewalParam = searchParams?.get("renewal");
+   const renewalSegment =
+     renewalParam === "soon" ? "soon" : renewalParam === "overdue" ? "overdue" : "all";
 
    useEffect(() => {
      const supabase = createClient();
@@ -160,6 +170,16 @@ type SortKey =
       }
 
       setCustomers(data ?? []);
+
+      const { data: renewalRows } = await supabase
+        .from("transactions")
+        .select("customer_id, date")
+        .eq("type", "renewal")
+        .limit(10000);
+      setMaxRenewalByCustomer(
+        maxRenewalDateByCustomer((renewalRows ?? []) as { customer_id: string; date: string }[]),
+      );
+
       setLoading(false);
      }
 
@@ -208,6 +228,20 @@ type SortKey =
 
   const filteredCustomers = useMemo(() => {
     const result = customers.filter((c) => {
+       if (renewalSegment === "soon") {
+         if (!isRenewalDueWithinDays(c.next_renewal_date, 30)) return false;
+       }
+       if (renewalSegment === "overdue") {
+         if (
+           !isRenewalOverdueActiveCustomer(
+             { status: c.status, next_renewal_date: c.next_renewal_date },
+             maxRenewalByCustomer[c.id],
+           )
+         ) {
+           return false;
+         }
+       }
+
        if (
          filters.search &&
          !`${c.name} ${c.email}`.toLowerCase().includes(filters.search.toLowerCase())
@@ -316,7 +350,7 @@ type SortKey =
     });
 
     return sorted;
-  }, [customers, filters, sort]);
+  }, [customers, filters, sort, renewalSegment, maxRenewalByCustomer]);
 
   function handleSort(key: SortKey) {
     setSort((prev) =>
@@ -411,6 +445,35 @@ type SortKey =
           </p>
         )}
       </div>
+
+      {renewalSegment === "soon" && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-violet-200 bg-violet-50 px-3 py-2 text-sm text-violet-900">
+          <span>
+            Filter: <strong>Renewal due in the next 30 days</strong> (next renewal date between today and
+            today + 30 days).
+          </span>
+          <Link
+            href="/dashboard/customers"
+            className="shrink-0 text-violet-700 font-medium hover:underline"
+          >
+            Clear filter
+          </Link>
+        </div>
+      )}
+      {renewalSegment === "overdue" && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-900">
+          <span>
+            Filter: <strong>Renewal overdue</strong> — Active customers whose next renewal date is before
+            today and who have no renewal transaction on or after that due date.
+          </span>
+          <Link
+            href="/dashboard/customers"
+            className="shrink-0 text-orange-800 font-medium hover:underline"
+          >
+            Clear filter
+          </Link>
+        </div>
+      )}
 
       <section className="mt-6 bg-white rounded-xl border border-stone-200 p-4">
         <h3 className="text-sm font-semibold text-stone-900">Create new customer account</h3>
@@ -851,4 +914,17 @@ type SortKey =
    );
  }
 
+export default function CustomersPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="mt-6 text-stone-500" aria-live="polite">
+          Loading customers…
+        </div>
+      }
+    >
+      <CustomersPageContent />
+    </Suspense>
+  );
+}
 
