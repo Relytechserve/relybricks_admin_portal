@@ -6,6 +6,7 @@
  import { createClient } from "@/lib/supabase";
  import { logClientAdminActivity } from "@/lib/client-admin-activity";
  import { syncCustomerSubscriptionMirrorFromProperties } from "@/lib/sync-customer-subscription-mirror";
+ import AddPropertyTransactionForm from "./AddPropertyTransactionForm";
 
  type Customer = {
    id: string;
@@ -74,11 +75,14 @@
 type CustomerNote = {
   id: string;
   customer_id: string;
+  customer_property_id: string | null;
   body: string;
   is_customer_visible: boolean;
   author_email: string | null;
   created_at: string | null;
 };
+
+type PropertyHubTab = "details" | "activity" | "documents";
 
 type SubscriptionTier = {
   id: string;
@@ -183,7 +187,12 @@ function joinName(title: string, first: string, last: string): string {
   const [notes, setNotes] = useState<CustomerNote[]>([]);
   const [newNoteBody, setNewNoteBody] = useState("");
   const [newNoteCustomerVisible, setNewNoteCustomerVisible] = useState(false);
-  const [savingNote, setSavingNote] = useState(false);
+  /** `"account"` or a `customer_properties.id` while that note save is in flight */
+  const [noteSavingKey, setNoteSavingKey] = useState<string | null>(null);
+  const [propertyHubOpen, setPropertyHubOpen] = useState<Record<string, boolean>>({});
+  const [propertyHubTab, setPropertyHubTab] = useState<Record<string, PropertyHubTab>>({});
+  const [propertyNoteBody, setPropertyNoteBody] = useState<Record<string, string>>({});
+  const [propertyNoteVisible, setPropertyNoteVisible] = useState<Record<string, boolean>>({});
   const [tiers, setTiers] = useState<SubscriptionTier[]>([]);
   const [tierPrices, setTierPrices] = useState<SubscriptionTierPrice[]>([]);
   const [loginPassword, setLoginPassword] = useState("");
@@ -196,13 +205,10 @@ function joinName(title: string, first: string, last: string): string {
   const [transactions, setTransactions] = useState<CustomerTransaction[]>([]);
   const [loadingTransactions, setLoadingTransactions] = useState(true);
   const [transactionError, setTransactionError] = useState<string | null>(null);
-  const [newTransactionType, setNewTransactionType] = useState<CustomerTransaction["type"]>("renewal");
-  const [newTransactionAmount, setNewTransactionAmount] = useState("");
-  const [newTransactionDate, setNewTransactionDate] = useState("");
-  const [newTransactionDescription, setNewTransactionDescription] = useState("");
-  const [newTransactionPropertyId, setNewTransactionPropertyId] = useState("");
-  const [savingTransaction, setSavingTransaction] = useState(false);
-  const [transactionSuccess, setTransactionSuccess] = useState<string | null>(null);
+  const [transactionFeedback, setTransactionFeedback] = useState<{
+    ok: boolean;
+    msg: string;
+  } | null>(null);
   const [editingTransactionId, setEditingTransactionId] = useState<string | null>(null);
   const [editTxType, setEditTxType] = useState<CustomerTransaction["type"]>("renewal");
   const [editTxDate, setEditTxDate] = useState("");
@@ -353,7 +359,9 @@ function joinName(title: string, first: string, last: string): string {
 
       const { data: notesData } = await supabase
         .from("customer_notes")
-        .select("id, customer_id, body, is_customer_visible, author_email, created_at")
+        .select(
+          "id, customer_id, customer_property_id, body, is_customer_visible, author_email, created_at",
+        )
         .eq("customer_id", id)
         .order("created_at", { ascending: false });
       if (notesData) {
@@ -378,17 +386,20 @@ function joinName(title: string, first: string, last: string): string {
      load();
    }, [id, router]);
 
-  const formattedRenewalDate = useMemo(
-    () => formatDate(form?.next_renewal_date ?? null),
-    [form?.next_renewal_date],
-  );
-
   useEffect(() => {
-    if (!newTransactionDate) {
-      const today = new Date().toISOString().slice(0, 10);
-      setNewTransactionDate(today);
-    }
-  }, [newTransactionDate]);
+    if (properties.length <= 1) return;
+    setPropertyHubOpen((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      properties.forEach((p, i) => {
+        if (!(p.id in next)) {
+          next[p.id] = i === 0;
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [properties]);
 
    const paymentStatus = useMemo(() => {
      if (!form) return null;
@@ -399,11 +410,6 @@ function joinName(title: string, first: string, last: string): string {
      if (billed != null && Number(billed) > 0) return "paid";
      return "unpaid";
    }, [form]);
-
-   const formattedPackageRevenue = useMemo(
-     () => formatCurrency(form?.package_revenue ?? null),
-     [form?.package_revenue],
-   );
 
    const formattedOutstanding = useMemo(
      () => formatCurrency(form?.outstanding_amount ?? null),
@@ -420,6 +426,76 @@ function joinName(title: string, first: string, last: string): string {
     if (!p) return "Property";
     const bit = p.city?.trim() || p.area?.trim() || p.full_address?.trim()?.slice(0, 36);
     return bit ? bit : "Property";
+  }
+
+  const legacyTransactions = useMemo(
+    () => transactions.filter((t) => !t.customer_property_id),
+    [transactions],
+  );
+
+  const propertyRollup = useMemo(() => {
+    const dates = properties
+      .map((p) => p.next_renewal_date)
+      .filter((d): d is string => Boolean(d));
+    dates.sort();
+    const earliest = dates[0] ?? form?.next_renewal_date ?? null;
+    let revenue = 0;
+    for (const p of properties) {
+      if (p.package_revenue != null && !Number.isNaN(Number(p.package_revenue))) {
+        revenue += Number(p.package_revenue);
+      }
+    }
+    return {
+      earliestLabel: earliest ? formatDate(earliest) : null,
+      revenueLabel: revenue > 0 ? formatCurrency(revenue) : null,
+      propertyCount: properties.length,
+    };
+  }, [properties, form?.next_renewal_date]);
+
+  async function refetchAfterTransaction() {
+    if (!id) return;
+    const supabase = createClient();
+    const [propsRes, custRes] = await Promise.all([
+      supabase
+        .from("customer_properties")
+        .select(
+          "id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing, subscription_tier_id, plan_type, subscription_date, next_renewal_date, package_revenue",
+        )
+        .eq("customer_id", id)
+        .order("created_at", { ascending: true }),
+      supabase
+        .from("customers")
+        .select(
+          "plan_type, subscription_tier_id, next_renewal_date, subscription_date, package_revenue",
+        )
+        .eq("id", id)
+        .maybeSingle(),
+    ]);
+    if (propsRes.data) {
+      setProperties(propsRes.data as unknown as CustomerProperty[]);
+    }
+    if (custRes.data) {
+      const r = custRes.data as Pick<
+        Customer,
+        "plan_type" | "subscription_tier_id" | "next_renewal_date" | "subscription_date" | "package_revenue"
+      >;
+      setForm((f) => (f ? { ...f, ...r } : f));
+      setCustomer((c) => (c ? { ...c, ...r } : c));
+    }
+  }
+
+  function mergeTransactionSuccess(
+    result: {
+      data?: CustomerTransaction;
+      nextRenewalDate?: string | null;
+    },
+  ) {
+    if (result.data) {
+      setTransactions((prev) => [result.data!, ...prev]);
+      setTransactionFeedback({ ok: true, msg: "Transaction added." });
+      setTimeout(() => setTransactionFeedback(null), 4000);
+    }
+    void refetchAfterTransaction();
   }
 
   function findTierPriceForCustomer(
@@ -764,9 +840,16 @@ function joinName(title: string, first: string, last: string): string {
     }
   }
 
-  async function handleAddNote() {
-    if (!id || !newNoteBody.trim()) return;
-    setSavingNote(true);
+  async function addCustomerNote(params: {
+    customerPropertyId: string | null;
+    body: string;
+    customerVisible: boolean;
+    onSuccessClear?: () => void;
+  }) {
+    const { customerPropertyId, body, customerVisible, onSuccessClear } = params;
+    if (!id || !body.trim()) return;
+    const savingKey = customerPropertyId ?? "account";
+    setNoteSavingKey(savingKey);
     const supabase = createClient();
 
     const {
@@ -777,94 +860,26 @@ function joinName(title: string, first: string, last: string): string {
       .from("customer_notes")
       .insert({
         customer_id: id,
-        body: newNoteBody.trim(),
-        is_customer_visible: newNoteCustomerVisible,
+        customer_property_id: customerPropertyId,
+        body: body.trim(),
+        is_customer_visible: customerVisible,
         author_email: user?.email ?? null,
       })
-      .select("id, customer_id, body, is_customer_visible, author_email, created_at")
+      .select(
+        "id, customer_id, customer_property_id, body, is_customer_visible, author_email, created_at",
+      )
       .single();
 
-    setSavingNote(false);
+    setNoteSavingKey(null);
     if (error) return;
     setNotes((prev) => [data as unknown as CustomerNote, ...prev]);
-    setNewNoteBody("");
-    setNewNoteCustomerVisible(false);
+    onSuccessClear?.();
     void logClientAdminActivity({
       action: "note.added",
       resourceType: "customer",
       resourceId: id,
-      summary: `Added note for ${form?.name ?? "customer"}`,
+      summary: `Added ${customerPropertyId ? "property" : "account"} note for ${form?.name ?? "customer"}`,
     });
-  }
-
-  async function handleAddTransaction() {
-    if (!id || !newTransactionDate) return;
-    setSavingTransaction(true);
-    setTransactionError(null);
-    setTransactionSuccess(null);
-    const amount =
-      newTransactionAmount.trim() === ""
-        ? null
-        : Number(newTransactionAmount.trim());
-    const propertyIdForTx = newTransactionPropertyId.trim();
-
-    try {
-      const res = await fetch(`/api/customers/${id}/transactions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: newTransactionType,
-          date: newTransactionDate,
-          amount: amount != null && !Number.isNaN(amount) ? amount : null,
-          description: newTransactionDescription.trim() || null,
-          customer_property_id: propertyIdForTx || null,
-        }),
-      });
-      const result = (await res.json()) as {
-        data?: CustomerTransaction;
-        nextRenewalDate?: string | null;
-        error?: string;
-      };
-
-      if (!res.ok) {
-        setTransactionError(result.error ?? "Failed to add transaction.");
-        return;
-      }
-
-      if (result.data) {
-        setTransactions((prev) => [result.data as CustomerTransaction, ...prev]);
-        setTransactionSuccess("Transaction added.");
-        setNewTransactionType("renewal");
-        setNewTransactionAmount("");
-        setNewTransactionDescription("");
-        setNewTransactionPropertyId("");
-        setNewTransactionDate(new Date().toISOString().slice(0, 10));
-        if (result.nextRenewalDate) {
-          if (propertyIdForTx) {
-            setProperties((prev) =>
-              prev.map((p) =>
-                p.id === propertyIdForTx
-                  ? { ...p, next_renewal_date: result.nextRenewalDate! }
-                  : p,
-              ),
-            );
-          }
-          if (form) {
-            setForm({ ...form, next_renewal_date: result.nextRenewalDate });
-            setCustomer((c) =>
-              c ? { ...c, next_renewal_date: result.nextRenewalDate! } : c,
-            );
-          }
-        }
-        setTimeout(() => setTransactionSuccess(null), 3000);
-      } else {
-        setTransactionError("Failed to add transaction.");
-      }
-    } catch {
-      setTransactionError("Failed to add transaction.");
-    } finally {
-      setSavingTransaction(false);
-    }
   }
 
   function openEditTransaction(tx: CustomerTransaction) {
@@ -922,22 +937,7 @@ function joinName(title: string, first: string, last: string): string {
         setTransactions((prev) =>
           prev.map((t) => (t.id === editingTransactionId ? result.data! : t)),
         );
-        if (result.nextRenewalDate) {
-          const pid = result.data.customer_property_id;
-          if (pid) {
-            setProperties((prev) =>
-              prev.map((p) =>
-                p.id === pid ? { ...p, next_renewal_date: result.nextRenewalDate! } : p,
-              ),
-            );
-          }
-          if (form) {
-            setForm({ ...form, next_renewal_date: result.nextRenewalDate });
-            setCustomer((c) =>
-              c ? { ...c, next_renewal_date: result.nextRenewalDate! } : c,
-            );
-          }
-        }
+        void refetchAfterTransaction();
         cancelEditTransaction();
       }
     } catch {
@@ -1205,7 +1205,11 @@ function joinName(title: string, first: string, last: string): string {
 
              <div className="bg-white rounded-xl border border-stone-200 p-4">
                <div className="flex items-center justify-between gap-2">
-                 <p className="text-sm text-stone-500">Properties</p>
+                 <p className="text-sm font-medium text-stone-900">Properties hub</p>
+                 <p className="text-xs text-stone-500 mt-0.5 max-w-xl">
+                   Each card is one property, with tabs for details (incl. property notes), activity &
+                   renewals, and documents. With multiple properties, use the arrow to collapse cards.
+                 </p>
                  {!loadingProperties && (
                    <button
                      type="button"
@@ -1228,11 +1232,93 @@ function joinName(title: string, first: string, last: string): string {
                    {properties.length === 0 && (
                      <p className="text-sm text-stone-500">No properties yet. Add one above.</p>
                    )}
-                   {properties.map((prop) => (
+                   {properties.map((prop) => {
+                     const multiProp = properties.length > 1;
+                     const hubOpen =
+                       !multiProp ||
+                       (propertyHubOpen[prop.id] ?? properties[0]?.id === prop.id);
+                     const tab = propertyHubTab[prop.id] ?? "details";
+                     const propertyNotes = notes.filter(
+                       (n) => n.customer_property_id === prop.id,
+                     );
+                     return (
                      <div
                        key={prop.id}
-                       className="rounded-lg border border-stone-200 bg-stone-50/50 p-3 space-y-2"
+                       className="rounded-xl border border-stone-200 border-l-4 border-l-blue-500 bg-gradient-to-br from-stone-50/80 to-white p-4 shadow-sm"
                      >
+                       <div className="flex flex-wrap items-start justify-between gap-2 border-b border-stone-200 pb-2">
+                         <div className="flex items-start gap-2 min-w-0">
+                           {multiProp ? (
+                             <button
+                               type="button"
+                               aria-expanded={hubOpen}
+                               onClick={() =>
+                                 setPropertyHubOpen((prev) => {
+                                   const open =
+                                     prev[prop.id] ?? properties[0]?.id === prop.id;
+                                   return { ...prev, [prop.id]: !open };
+                                 })
+                               }
+                               className="mt-0.5 shrink-0 rounded p-0.5 text-stone-500 hover:bg-stone-100 hover:text-stone-700"
+                             >
+                               <span className="sr-only">
+                                 {hubOpen ? "Collapse property" : "Expand property"}
+                               </span>
+                               <span aria-hidden>{hubOpen ? "▼" : "▶"}</span>
+                             </button>
+                           ) : null}
+                           <div className="min-w-0">
+                             <p className="text-sm font-semibold text-stone-900">
+                               {propertyTransactionLabel(prop.id)}
+                             </p>
+                             <p className="text-[11px] text-stone-500">
+                               Next renewal:{" "}
+                               <span className="font-medium text-stone-800">
+                                 {formatDate(prop.next_renewal_date ?? null) ?? "Not set"}
+                               </span>
+                             </p>
+                           </div>
+                         </div>
+                         <span className="text-[10px] uppercase tracking-wide text-stone-400 shrink-0">
+                           Property
+                         </span>
+                       </div>
+                       {hubOpen ? (
+                         <>
+                           <div
+                             role="tablist"
+                             className="mt-3 flex flex-wrap gap-1 border-b border-stone-200"
+                           >
+                             {(
+                               [
+                                 ["details", "Property details"],
+                                 ["activity", "Activity & renewals"],
+                                 ["documents", "Documents"],
+                               ] as const
+                             ).map(([key, label]) => (
+                               <button
+                                 key={key}
+                                 type="button"
+                                 role="tab"
+                                 aria-selected={tab === key}
+                                 onClick={() =>
+                                   setPropertyHubTab((prev) => ({
+                                     ...prev,
+                                     [prop.id]: key,
+                                   }))
+                                 }
+                                 className={`px-3 py-2 text-xs font-medium rounded-t-md border-b-2 -mb-px transition-colors ${
+                                   tab === key
+                                     ? "border-blue-600 text-blue-800 bg-white"
+                                     : "border-transparent text-stone-500 hover:text-stone-800"
+                                 }`}
+                               >
+                                 {label}
+                               </button>
+                             ))}
+                           </div>
+                           <div className="pt-3 space-y-3">
+                       {tab === "details" ? (
                        <div className="grid gap-2 text-sm">
                          <label className="text-stone-600">Address</label>
                          <textarea
@@ -1449,24 +1535,272 @@ function joinName(title: string, first: string, last: string): string {
                              />
                            </div>
                          </div>
-                         <div className="flex gap-2 pt-1">
+                         <div className="mt-3 pt-3 border-t border-stone-200 space-y-2">
+                           <p className="text-xs font-medium text-stone-600">
+                             Notes (this property)
+                           </p>
+                           <p className="text-[10px] text-stone-500">
+                             Scoped to this property. Customer-visible notes show on the portal under this
+                             property.
+                           </p>
+                           <div className="max-h-36 overflow-y-auto space-y-2">
+                             {propertyNotes.length === 0 && (
+                               <p className="text-[11px] text-stone-500">
+                                 No notes for this property yet.
+                               </p>
+                             )}
+                             {propertyNotes.map((note) => {
+                               const created = formatDate(note.created_at ?? null) ?? "";
+                               const isCustomer = note.is_customer_visible;
+                               return (
+                                 <div
+                                   key={note.id}
+                                   className={
+                                     isCustomer
+                                       ? "rounded-lg border border-blue-100 bg-blue-50/80 px-2 py-1.5"
+                                       : "rounded-lg border border-stone-200 bg-white px-2 py-1.5"
+                                   }
+                                 >
+                                   <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] text-stone-600">
+                                     <span>
+                                       {note.author_email}
+                                       {created ? ` · ${created}` : ""}
+                                     </span>
+                                     <span
+                                       className={
+                                         isCustomer
+                                           ? "text-[10px] font-medium text-blue-700"
+                                           : "text-[10px] font-medium text-stone-600"
+                                       }
+                                     >
+                                       {isCustomer ? "Customer" : "Internal"}
+                                     </span>
+                                   </div>
+                                   <p className="mt-0.5 text-[11px] text-stone-800 whitespace-pre-wrap">
+                                     {note.body}
+                                   </p>
+                                 </div>
+                               );
+                             })}
+                           </div>
+                           <textarea
+                             value={propertyNoteBody[prop.id] ?? ""}
+                             onChange={(e) =>
+                               setPropertyNoteBody((prev) => ({
+                                 ...prev,
+                                 [prop.id]: e.target.value,
+                               }))
+                             }
+                             rows={2}
+                             placeholder="Add a note for this property..."
+                             className="w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           />
+                           <div className="flex flex-wrap items-center justify-between gap-2">
+                             <label className="inline-flex items-center gap-2 text-[11px] text-stone-700">
+                               <input
+                                 type="checkbox"
+                                 checked={propertyNoteVisible[prop.id] ?? false}
+                                 onChange={(e) =>
+                                   setPropertyNoteVisible((prev) => ({
+                                     ...prev,
+                                     [prop.id]: e.target.checked,
+                                   }))
+                                 }
+                                 className="h-3 w-3 rounded border-stone-300 text-blue-600 focus:ring-blue-500"
+                               />
+                               <span>Customer visible</span>
+                             </label>
+                             <button
+                               type="button"
+                               onClick={() =>
+                                 void addCustomerNote({
+                                   customerPropertyId: prop.id,
+                                   body: propertyNoteBody[prop.id] ?? "",
+                                   customerVisible: propertyNoteVisible[prop.id] ?? false,
+                                   onSuccessClear: () => {
+                                     setPropertyNoteBody((p) => ({ ...p, [prop.id]: "" }));
+                                     setPropertyNoteVisible((p) => ({ ...p, [prop.id]: false }));
+                                   },
+                                 })
+                               }
+                               disabled={
+                                 noteSavingKey === prop.id ||
+                                 !(propertyNoteBody[prop.id] ?? "").trim()
+                               }
+                               className="rounded-lg bg-stone-900 px-2 py-1 text-[11px] font-medium text-white hover:bg-stone-800 disabled:opacity-50"
+                             >
+                               {noteSavingKey === prop.id ? "Saving…" : "Add note"}
+                             </button>
+                           </div>
+                         </div>
+                         <div className="flex flex-wrap gap-2 pt-3 border-t border-stone-200">
                            <button
                              type="button"
                              onClick={() => handleSaveProperty(prop)}
                              disabled={propertySavingId === prop.id}
                              className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-60"
                            >
-                             {propertySavingId === prop.id ? "Saving…" : "Save"}
+                             {propertySavingId === prop.id ? "Saving…" : "Save property"}
                            </button>
                            <button
                              type="button"
                              onClick={() => handleDeleteProperty(prop)}
                              className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-50"
                            >
-                             Remove
+                             Remove property
                            </button>
                          </div>
-                         <div className="mt-3 pt-3 border-t border-stone-200">
+                       </div>
+                       ) : tab === "activity" ? (
+                         <div className="space-y-2">
+                           <p className="text-xs font-medium text-stone-600">Activity & renewals</p>
+                           <p className="text-[10px] text-stone-500">
+                             Renewals logged here update this property’s next renewal (+1 year from payment date).
+                           </p>
+                           <AddPropertyTransactionForm
+                             customerId={id!}
+                             customerPropertyId={prop.id}
+                             onSuccess={mergeTransactionSuccess}
+                             onError={(msg) =>
+                               setTransactionFeedback(
+                                 msg ? { ok: false, msg } : null,
+                               )
+                             }
+                           />
+                           <div className="max-h-48 overflow-y-auto space-y-1 pt-1">
+                             {loadingTransactions ? (
+                               <p className="text-[11px] text-stone-500">Loading…</p>
+                             ) : (
+                               transactions
+                                 .filter((tx) => tx.customer_property_id === prop.id)
+                                 .map((tx) => (
+                                   <div key={tx.id} className="space-y-1">
+                                     {editingTransactionId === tx.id ? (
+                                       <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-2 space-y-2">
+                                         <p className="text-[11px] font-medium text-stone-700">Edit transaction</p>
+                                         <div className="grid gap-2 grid-cols-2">
+                                           <div>
+                                             <label className="block text-[10px] text-stone-600">Type</label>
+                                             <select
+                                               value={editTxType}
+                                               onChange={(e) =>
+                                                 setEditTxType(e.target.value as CustomerTransaction["type"])
+                                               }
+                                               className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1 text-[11px]"
+                                             >
+                                               <option value="renewal">Renewal</option>
+                                               <option value="payment">Payment</option>
+                                               <option value="other">Other</option>
+                                             </select>
+                                           </div>
+                                           <div>
+                                             <label className="block text-[10px] text-stone-600">Date</label>
+                                             <input
+                                               type="date"
+                                               value={editTxDate}
+                                               onChange={(e) => setEditTxDate(e.target.value)}
+                                               className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1 text-[11px]"
+                                             />
+                                           </div>
+                                         </div>
+                                         <div className="grid gap-2 grid-cols-2">
+                                           <div>
+                                             <label className="block text-[10px] text-stone-600">Amount</label>
+                                             <input
+                                               type="number"
+                                               min={0}
+                                               value={editTxAmount}
+                                               onChange={(e) => setEditTxAmount(e.target.value)}
+                                               className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1 text-[11px]"
+                                             />
+                                           </div>
+                                           <div>
+                                             <label className="block text-[10px] text-stone-600">Description</label>
+                                             <input
+                                               type="text"
+                                               value={editTxDescription}
+                                               onChange={(e) => setEditTxDescription(e.target.value)}
+                                               className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1 text-[11px]"
+                                             />
+                                           </div>
+                                         </div>
+                                         <div>
+                                           <label className="block text-[10px] text-stone-600">
+                                             Reason <span className="text-red-600">*</span>
+                                           </label>
+                                           <input
+                                             type="text"
+                                             value={editTxReason}
+                                             onChange={(e) => {
+                                               setEditTxReason(e.target.value);
+                                               setEditTxError(null);
+                                             }}
+                                             className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1 text-[11px]"
+                                           />
+                                         </div>
+                                         {editTxError && (
+                                           <p className="text-[10px] text-red-600">{editTxError}</p>
+                                         )}
+                                         <div className="flex gap-2">
+                                           <button
+                                             type="button"
+                                             onClick={() => void handleEditTransaction()}
+                                             disabled={savingEditTx}
+                                             className="rounded bg-blue-600 px-2 py-1 text-[11px] font-medium text-white disabled:opacity-60"
+                                           >
+                                             {savingEditTx ? "Saving…" : "Save"}
+                                           </button>
+                                           <button
+                                             type="button"
+                                             onClick={cancelEditTransaction}
+                                             disabled={savingEditTx}
+                                             className="rounded border border-stone-300 bg-white px-2 py-1 text-[11px]"
+                                           >
+                                             Cancel
+                                           </button>
+                                         </div>
+                                       </div>
+                                     ) : (
+                                       <div className="flex items-start justify-between gap-2 rounded-md bg-white border border-stone-100 px-2 py-1.5">
+                                         <div>
+                                           <p className="text-[11px] font-medium capitalize text-stone-800">
+                                             {tx.type}
+                                           </p>
+                                           <p className="text-[10px] text-stone-500">
+                                             {new Date(tx.date).toLocaleDateString("en-IN")}
+                                           </p>
+                                           {tx.description && (
+                                             <p className="text-[10px] text-stone-600">{tx.description}</p>
+                                           )}
+                                         </div>
+                                         <div className="flex items-center gap-1 shrink-0">
+                                           <span className="text-[11px] font-semibold">
+                                             {tx.amount != null
+                                               ? `₹${Number(tx.amount).toLocaleString("en-IN")}`
+                                               : "—"}
+                                           </span>
+                                           <button
+                                             type="button"
+                                             onClick={() => openEditTransaction(tx)}
+                                             className="text-[10px] text-blue-600 hover:underline"
+                                           >
+                                             Edit
+                                           </button>
+                                         </div>
+                                       </div>
+                                     )}
+                                   </div>
+                                 ))
+                             )}
+                             {!loadingTransactions &&
+                               transactions.filter((tx) => tx.customer_property_id === prop.id)
+                                 .length === 0 && (
+                                 <p className="text-[11px] text-stone-500">No entries for this property yet.</p>
+                               )}
+                           </div>
+                         </div>
+                       ) : tab === "documents" ? (
+                         <div className="space-y-2">
                            <p className="text-xs font-medium text-stone-600 mb-2">Documents</p>
                            {documentMessage && (
                              <p className={`text-xs mb-2 ${documentMessage.type === "success" ? "text-emerald-700" : "text-red-600"}`}>
@@ -1525,12 +1859,107 @@ function joinName(title: string, first: string, last: string): string {
                              )}
                            </div>
                          </div>
-                       </div>
+                       ) : null}
+                           </div>
+                         </>
+                       ) : null}
                      </div>
-                   ))}
+                   );
+                   })}
                  </div>
                )}
              </div>
+
+             <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
+              <p className="text-sm font-medium text-stone-900">Notes & comments</p>
+              <p className="text-xs text-stone-500">
+                Account-wide only (not tied to a property). Property-specific notes live under each property
+                card → Property details. Tick “Customer visible” to show in the customer portal.
+              </p>
+              <div className="space-y-2">
+                <textarea
+                  value={newNoteBody}
+                  onChange={(event) => setNewNoteBody(event.target.value)}
+                  rows={3}
+                  placeholder="Add a new note..."
+                  className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+                <div className="flex items-center justify-between gap-3">
+                  <label className="inline-flex items-center gap-2 text-xs text-stone-700">
+                    <input
+                      type="checkbox"
+                      checked={newNoteCustomerVisible}
+                      onChange={(event) => setNewNoteCustomerVisible(event.target.checked)}
+                      className="h-3 w-3 rounded border-stone-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <span>Customer visible</span>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void addCustomerNote({
+                        customerPropertyId: null,
+                        body: newNoteBody,
+                        customerVisible: newNoteCustomerVisible,
+                        onSuccessClear: () => {
+                          setNewNoteBody("");
+                          setNewNoteCustomerVisible(false);
+                        },
+                      })
+                    }
+                    disabled={noteSavingKey === "account" || !newNoteBody.trim()}
+                    className="inline-flex items-center rounded-lg bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
+                  >
+                    {noteSavingKey === "account" ? "Saving…" : "Add note"}
+                  </button>
+                </div>
+              </div>
+              <div className="mt-2 space-y-2 max-h-64 overflow-y-auto">
+                {notes.filter((n) => !n.customer_property_id).length === 0 && (
+                  <p className="text-xs text-stone-500">No account-wide notes yet.</p>
+                )}
+                {notes
+                  .filter((n) => !n.customer_property_id)
+                  .map((note) => {
+                  const created = formatDate(note.created_at ?? null) ?? "";
+                  const isCustomer = note.is_customer_visible;
+                  return (
+                    <div
+                      key={note.id}
+                      className={
+                        isCustomer
+                          ? "rounded-lg border border-blue-100 bg-blue-50 px-3 py-2"
+                          : "rounded-lg border border-stone-200 bg-stone-50 px-3 py-2"
+                      }
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-600">
+                          {note.author_email && <span>{note.author_email}</span>}
+                          {created && (
+                            <>
+                              <span>•</span>
+                              <span>{created}</span>
+                            </>
+                          )}
+                        </div>
+                        <span
+                          className={
+                            isCustomer
+                              ? "inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700"
+                              : "inline-flex items-center rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-700"
+                          }
+                        >
+                          {isCustomer ? "Customer note" : "Internal"}
+                        </span>
+                      </div>
+                      <p className="mt-1 text-xs text-stone-800 whitespace-pre-wrap">
+                        {note.body}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
 
              <div className="bg-white rounded-xl border border-stone-200 p-4">
                <p className="text-sm text-stone-500">Account manager</p>
@@ -1575,354 +2004,227 @@ function joinName(title: string, first: string, last: string): string {
              </div>
            </div>
            <div className="space-y-4">
-              <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
-               <p className="text-xs text-stone-500">
-                 Plan, start date, next renewal, and package revenue are stored per property (left).
-                 This panel shows a rolled-up copy for customer-level reports and legacy integrations.
-               </p>
-               <div>
-                 <p className="text-sm text-stone-500">Rolled-up subscription start</p>
-                 <p className="mt-1 text-sm font-medium text-stone-900">
-                   {formatDate(form.subscription_date ?? null) ?? "Not set"}
-                 </p>
-                 <select
-                   value={form.renewal_status ?? ""}
-                   onChange={(event) =>
-                     updateField(
-                       "renewal_status",
-                       (event.target.value || null) as Customer["renewal_status"],
-                     )
-                   }
-                   className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 >
-                   <option value="">Renewal status</option>
-                   <option value="on_time">On time</option>
-                   <option value="overdue">Overdue</option>
-                   <option value="cancelled">Cancelled</option>
-                 </select>
-               </div>
-                {customer?.contract_term_months != null && (
-                 <div>
-                   <p className="text-sm text-stone-500">Contract term</p>
-                   <p className="mt-1 text-sm text-stone-900">
-                     {customer.contract_term_months} months
-                   </p>
-                 </div>
-               )}
-             </div>
-             <div className="bg-white rounded-xl border border-stone-200 p-4">
-               <p className="text-sm text-stone-500">Next renewal (earliest across properties)</p>
-               <p className="mt-0.5 text-xs text-stone-500">Yearly subscription per property</p>
-               <p className="mt-1 text-base font-semibold text-stone-900">
-                 {formattedRenewalDate ?? "Not scheduled"}
-               </p>
-               <p className="mt-2 text-xs text-stone-500">
-                 Edit each property’s dates on the left, or log a renewal and link it to that property.
-               </p>
-             </div>
-            <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
-              <div>
-                <p className="text-sm text-stone-500">Rolled-up plan</p>
-                <p className="mt-1 text-sm font-medium text-stone-900">
-                  {form.plan_type ?? "Not set"}
-                </p>
-                <p className="mt-1 text-xs text-stone-500">
-                  Primary tier is taken from the first property that has a tier (by creation order).
-                </p>
-              </div>
-              <div>
-                <p className="text-sm text-stone-500">Total annual package revenue</p>
-                <p className="mt-1 text-base font-semibold text-stone-900">
-                  {formattedPackageRevenue ?? "Not set"}
-                </p>
-                <p className="mt-1 text-xs text-stone-500">Sum of each property’s annual package revenue.</p>
-              </div>
-               <div>
-                 <p className="text-sm text-stone-500">Outstanding amount</p>
-                 <p className="mt-1 text-base font-semibold text-stone-900">
-                   {formattedOutstanding ?? "None"}
-                 </p>
-                 <input
-                   type="number"
-                   min={0}
-                   value={form.outstanding_amount ?? ""}
-                   onChange={(event) =>
-                     updateField(
-                       "outstanding_amount",
-                       event.target.value === ""
-                         ? null
-                         : Number(event.target.value),
-                     )
-                   }
-                   className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 />
-               </div>
-               <div>
-                 <p className="text-sm text-stone-500">Payment status</p>
-                 <p className="mt-1">
-                   <span
-                     className={
-                       paymentStatus === "paid"
-                         ? "inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-100"
-                         : "inline-flex items-center rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 border border-amber-100"
-                     }
-                   >
-                     {paymentStatus === "paid" ? "Paid" : "Not paid"}
-                   </span>
-                 </p>
-                 <select
-                   value={form.payment_status ?? ""}
-                   onChange={(event) =>
-                     updateField(
-                       "payment_status",
-                       (event.target.value || null) as Customer["payment_status"],
-                     )
-                   }
-                   className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                 >
-                   <option value="">Not set</option>
-                   <option value="paid">Paid</option>
-                   <option value="partially_paid">Partially paid</option>
-                   <option value="overdue">Overdue</option>
-                   <option value="write_off">Write off</option>
-                 </select>
-               </div>
-            </div>
             <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-sm font-medium text-stone-900">Transactions & renewals</p>
-                {!loadingTransactions && transactions.length > 0 && (
-                  <p className="text-xs text-stone-500">
-                    {transactions.length} entry{transactions.length === 1 ? "" : "ies"}
-                  </p>
-                )}
-              </div>
-              <p className="text-xs text-stone-500">
-                Log when renewal payments or other billing events are completed. These entries are
-                visible to the customer in their dashboard. For a renewal, pick a property to move
-                that property’s next renewal forward by one year; leave property blank only for legacy
-                customer-level renewals.
+              <p className="text-sm font-medium text-stone-900">Account billing</p>
+              <p className="text-xs text-stone-500 rounded-lg bg-stone-50 border border-stone-100 px-2 py-1.5">
+                <span className="font-medium text-stone-700">Rollup</span> ·{" "}
+                {propertyRollup.propertyCount} propert
+                {propertyRollup.propertyCount === 1 ? "y" : "ies"} · Earliest renewal{" "}
+                {propertyRollup.earliestLabel ?? "—"} · Total package{" "}
+                {propertyRollup.revenueLabel ?? "—"} · Plan (mirror) {form.plan_type ?? "—"}
               </p>
-              <div className="space-y-2">
-                <label className="block text-xs text-stone-600">Property (optional)</label>
+              <div>
+                <p className="text-sm text-stone-500">Renewal status</p>
                 <select
-                  value={newTransactionPropertyId}
-                  onChange={(event) => setNewTransactionPropertyId(event.target.value)}
-                  className="w-full max-w-md rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={form.renewal_status ?? ""}
+                  onChange={(event) =>
+                    updateField(
+                      "renewal_status",
+                      (event.target.value || null) as Customer["renewal_status"],
+                    )
+                  }
+                  className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  <option value="">All properties (legacy customer renewal)</option>
-                  {properties.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {propertyTransactionLabel(p.id)}
-                    </option>
-                  ))}
+                  <option value="">Not set</option>
+                  <option value="on_time">On time</option>
+                  <option value="overdue">Overdue</option>
+                  <option value="cancelled">Cancelled</option>
                 </select>
               </div>
-              <div className="grid gap-2 md:grid-cols-2">
-                <div className="space-y-2">
-                  <label className="block text-xs text-stone-600">Type</label>
-                  <select
-                    value={newTransactionType}
-                    onChange={(event) =>
-                      setNewTransactionType(event.target.value as CustomerTransaction["type"])
+              {customer?.contract_term_months != null && (
+                <p className="text-xs text-stone-600">
+                  Contract term:{" "}
+                  <span className="font-medium text-stone-900">
+                    {customer.contract_term_months} months
+                  </span>
+                </p>
+              )}
+              <div>
+                <p className="text-sm text-stone-500">Outstanding amount</p>
+                <p className="mt-1 text-base font-semibold text-stone-900">
+                  {formattedOutstanding ?? "None"}
+                </p>
+                <input
+                  type="number"
+                  min={0}
+                  value={form.outstanding_amount ?? ""}
+                  onChange={(event) =>
+                    updateField(
+                      "outstanding_amount",
+                      event.target.value === "" ? null : Number(event.target.value),
+                    )
+                  }
+                  className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <div>
+                <p className="text-sm text-stone-500">Payment status</p>
+                <p className="mt-1">
+                  <span
+                    className={
+                      paymentStatus === "paid"
+                        ? "inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-100"
+                        : "inline-flex items-center rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 border border-amber-100"
                     }
-                    className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
-                    <option value="renewal">Renewal</option>
-                    <option value="payment">Payment</option>
-                    <option value="other">Other</option>
-                  </select>
-                </div>
-                <div className="space-y-2">
-                  <label className="block text-xs text-stone-600">Date</label>
-                  <input
-                    type="date"
-                    value={newTransactionDate}
-                    onChange={(event) => setNewTransactionDate(event.target.value)}
-                    className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-              <div className="grid gap-2 md:grid-cols-2">
-                <div className="space-y-2">
-                  <label className="block text-xs text-stone-600">Amount (optional)</label>
-                  <input
-                    type="number"
-                    min={0}
-                    value={newTransactionAmount}
-                    onChange={(event) => setNewTransactionAmount(event.target.value)}
-                    placeholder="INR"
-                    className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <label className="block text-xs text-stone-600">Description (optional)</label>
-                  <input
-                    type="text"
-                    value={newTransactionDescription}
-                    onChange={(event) => setNewTransactionDescription(event.target.value)}
-                    placeholder="e.g. Year 2 renewal payment"
-                    className="w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={handleAddTransaction}
-                  disabled={savingTransaction || !newTransactionDate}
-                  className="inline-flex items-center rounded-lg bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
+                    {paymentStatus === "paid" ? "Paid" : "Not paid"}
+                  </span>
+                </p>
+                <select
+                  value={form.payment_status ?? ""}
+                  onChange={(event) =>
+                    updateField(
+                      "payment_status",
+                      (event.target.value || null) as Customer["payment_status"],
+                    )
+                  }
+                  className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
                 >
-                  {savingTransaction ? "Adding…" : "Add transaction entry"}
-                </button>
-                {transactionSuccess && (
-                  <p className="text-xs text-emerald-700">{transactionSuccess}</p>
-                )}
-                {transactionError && (
-                  <p className="text-xs text-red-600">{transactionError}</p>
-                )}
+                  <option value="">Not set</option>
+                  <option value="paid">Paid</option>
+                  <option value="partially_paid">Partially paid</option>
+                  <option value="overdue">Overdue</option>
+                  <option value="write_off">Write off</option>
+                </select>
               </div>
-              <div className="mt-2 max-h-80 overflow-y-auto border-t border-stone-100 pt-2 space-y-1">
-                {loadingTransactions ? (
-                  <p className="text-xs text-stone-500">Loading transactions…</p>
-                ) : transactions.length === 0 ? (
-                  <p className="text-xs text-stone-500">No transaction entries yet.</p>
-                ) : (
-                  transactions.map((tx) => (
+            </div>
+
+            {transactionFeedback && (
+              <p
+                className={`text-xs px-2 py-1 rounded-lg ${
+                  transactionFeedback.ok
+                    ? "bg-emerald-50 text-emerald-800 border border-emerald-100"
+                    : "bg-red-50 text-red-700 border border-red-100"
+                }`}
+              >
+                {transactionFeedback.msg}
+              </p>
+            )}
+            {transactionError && (
+              <p className="text-xs text-red-600 px-2 py-1 rounded-lg bg-red-50 border border-red-100">
+                {transactionError}
+              </p>
+            )}
+
+            {properties.length === 0 && id && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-4 space-y-2">
+                <p className="text-sm font-medium text-stone-900">No property rows yet</p>
+                <p className="text-xs text-stone-600">
+                  Add a property in the hub, or log account-level transactions here (renewals update the
+                  customer record only).
+                </p>
+                <AddPropertyTransactionForm
+                  customerId={id}
+                  customerPropertyId={null}
+                  onSuccess={mergeTransactionSuccess}
+                  onError={(msg) =>
+                    setTransactionFeedback(msg ? { ok: false, msg } : null)
+                  }
+                />
+              </div>
+            )}
+
+            {legacyTransactions.length > 0 && (
+              <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
+                <p className="text-sm font-medium text-stone-900">Legacy transactions</p>
+                <p className="text-xs text-stone-500">
+                  Not linked to a property row. Prefer logging renewals inside each property card.
+                </p>
+                <div className="max-h-56 overflow-y-auto space-y-1 border-t border-stone-100 pt-2">
+                  {legacyTransactions.map((tx) => (
                     <div key={tx.id} className="space-y-1">
                       {editingTransactionId === tx.id ? (
-                        <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-3 space-y-2">
-                          <p className="text-xs font-medium text-stone-700">Edit transaction</p>
-                          <p className="text-[11px] text-stone-600">
-                            Property:{" "}
-                            <span className="font-medium text-stone-800">
-                              {propertyTransactionLabel(tx.customer_property_id)}
-                            </span>
-                          </p>
-                          <div className="grid gap-2 md:grid-cols-2">
-                            <div>
-                              <label className="block text-[11px] text-stone-600">Type</label>
-                              <select
-                                value={editTxType}
-                                onChange={(e) =>
-                                  setEditTxType(e.target.value as CustomerTransaction["type"])
-                                }
-                                className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
-                              >
-                                <option value="renewal">Renewal</option>
-                                <option value="payment">Payment</option>
-                                <option value="other">Other</option>
-                              </select>
-                            </div>
-                            <div>
-                              <label className="block text-[11px] text-stone-600">Date</label>
-                              <input
-                                type="date"
-                                value={editTxDate}
-                                onChange={(e) => setEditTxDate(e.target.value)}
-                                className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
-                              />
-                            </div>
-                          </div>
-                          <div className="grid gap-2 md:grid-cols-2">
-                            <div>
-                              <label className="block text-[11px] text-stone-600">Amount (optional)</label>
-                              <input
-                                type="number"
-                                min={0}
-                                value={editTxAmount}
-                                onChange={(e) => setEditTxAmount(e.target.value)}
-                                className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-[11px] text-stone-600">Description (optional)</label>
-                              <input
-                                type="text"
-                                value={editTxDescription}
-                                onChange={(e) => setEditTxDescription(e.target.value)}
-                                placeholder="e.g. Year 2 renewal payment"
-                                className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
-                              />
-                            </div>
-                          </div>
-                          <div>
-                            <label className="block text-[11px] text-stone-600">
-                              Reason for edit <span className="text-red-600">*</span>
-                            </label>
+                        <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-2 space-y-2">
+                          <p className="text-[11px] font-medium text-stone-700">Edit transaction</p>
+                          <div className="grid gap-2 grid-cols-2">
+                            <select
+                              value={editTxType}
+                              onChange={(e) =>
+                                setEditTxType(e.target.value as CustomerTransaction["type"])
+                              }
+                              className="rounded border border-stone-300 px-2 py-1 text-[11px]"
+                            >
+                              <option value="renewal">Renewal</option>
+                              <option value="payment">Payment</option>
+                              <option value="other">Other</option>
+                            </select>
                             <input
-                              type="text"
-                              value={editTxReason}
-                              onChange={(e) => {
-                                setEditTxReason(e.target.value);
-                                setEditTxError(null);
-                              }}
-                              placeholder="e.g. Corrected amount entry"
-                              className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+                              type="date"
+                              value={editTxDate}
+                              onChange={(e) => setEditTxDate(e.target.value)}
+                              className="rounded border border-stone-300 px-2 py-1 text-[11px]"
                             />
                           </div>
+                          <div className="grid gap-2 grid-cols-2">
+                            <input
+                              type="number"
+                              min={0}
+                              value={editTxAmount}
+                              onChange={(e) => setEditTxAmount(e.target.value)}
+                              className="rounded border border-stone-300 px-2 py-1 text-[11px]"
+                            />
+                            <input
+                              type="text"
+                              value={editTxDescription}
+                              onChange={(e) => setEditTxDescription(e.target.value)}
+                              className="rounded border border-stone-300 px-2 py-1 text-[11px]"
+                            />
+                          </div>
+                          <input
+                            type="text"
+                            value={editTxReason}
+                            onChange={(e) => {
+                              setEditTxReason(e.target.value);
+                              setEditTxError(null);
+                            }}
+                            placeholder="Edit reason *"
+                            className="w-full rounded border border-stone-300 px-2 py-1 text-[11px]"
+                          />
                           {editTxError && (
-                            <p className="text-xs text-red-600">{editTxError}</p>
+                            <p className="text-[10px] text-red-600">{editTxError}</p>
                           )}
-                          <div className="flex gap-2 pt-1">
+                          <div className="flex gap-2">
                             <button
                               type="button"
-                              onClick={handleEditTransaction}
+                              onClick={() => void handleEditTransaction()}
                               disabled={savingEditTx}
-                              className="rounded bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-60"
+                              className="rounded bg-blue-600 px-2 py-1 text-[11px] text-white disabled:opacity-60"
                             >
-                              {savingEditTx ? "Saving…" : "Save changes"}
+                              Save
                             </button>
                             <button
                               type="button"
                               onClick={cancelEditTransaction}
-                              disabled={savingEditTx}
-                              className="rounded border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-50"
+                              className="rounded border px-2 py-1 text-[11px]"
                             >
                               Cancel
                             </button>
                           </div>
                         </div>
                       ) : (
-                        <div className="flex items-start justify-between gap-3 rounded-lg bg-stone-50 px-3 py-2">
-                          <div className="space-y-0.5">
-                            <p className="text-xs font-medium text-stone-800 capitalize">
-                              {tx.type}
-                            </p>
-                            <p className="text-[10px] text-stone-500">
-                              {propertyTransactionLabel(tx.customer_property_id)}
-                            </p>
-                            <p className="text-[11px] text-stone-500">
-                              {new Date(tx.date).toLocaleDateString("en-IN")}
-                            </p>
-                            {tx.description && (
-                              <p className="text-[11px] text-stone-600">{tx.description}</p>
-                            )}
-                            {tx.last_edit_reason && (
-                              <p className="text-[10px] text-amber-700 italic">
-                                Edited: {tx.last_edit_reason}
-                              </p>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-semibold text-stone-900 whitespace-nowrap">
-                              {tx.amount != null ? `₹${Number(tx.amount).toLocaleString("en-IN")}` : "—"}
+                        <div className="flex justify-between gap-2 rounded-md bg-stone-50 px-2 py-1.5 text-[11px]">
+                          <div>
+                            <span className="font-medium capitalize">{tx.type}</span>
+                            <span className="text-stone-500">
+                              {" "}
+                              · {new Date(tx.date).toLocaleDateString("en-IN")}
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => openEditTransaction(tx)}
-                              className="text-xs text-blue-600 hover:underline shrink-0"
-                            >
-                              Edit
-                            </button>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => openEditTransaction(tx)}
+                            className="text-blue-600 hover:underline"
+                          >
+                            Edit
+                          </button>
                         </div>
                       )}
                     </div>
-                  ))
-                )}
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
+
             {(customer?.last_contacted_at || customer?.next_follow_up_at) && (
                <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
                  <div>
@@ -1939,83 +2241,6 @@ function joinName(title: string, first: string, last: string): string {
                  </div>
                </div>
             )}
-            <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
-              <p className="text-sm font-medium text-stone-900">Notes & comments</p>
-              <p className="text-xs text-stone-500">
-                Use notes to track interactions. Tick “Customer visible” to share the note with the customer.
-              </p>
-              <div className="space-y-2">
-                <textarea
-                  value={newNoteBody}
-                  onChange={(event) => setNewNoteBody(event.target.value)}
-                  rows={3}
-                  placeholder="Add a new note..."
-                  className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-                <div className="flex items-center justify-between gap-3">
-                  <label className="inline-flex items-center gap-2 text-xs text-stone-700">
-                    <input
-                      type="checkbox"
-                      checked={newNoteCustomerVisible}
-                      onChange={(event) => setNewNoteCustomerVisible(event.target.checked)}
-                      className="h-3 w-3 rounded border-stone-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span>Customer visible</span>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleAddNote}
-                    disabled={savingNote || !newNoteBody.trim()}
-                    className="inline-flex items-center rounded-lg bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
-                  >
-                    {savingNote ? "Saving…" : "Add note"}
-                  </button>
-                </div>
-              </div>
-              <div className="mt-2 space-y-2 max-h-64 overflow-y-auto">
-                {notes.length === 0 && (
-                  <p className="text-xs text-stone-500">No notes yet. Add the first note above.</p>
-                )}
-                {notes.map((note) => {
-                  const created = formatDate(note.created_at ?? null) ?? "";
-                  const isCustomer = note.is_customer_visible;
-                  return (
-                    <div
-                      key={note.id}
-                      className={
-                        isCustomer
-                          ? "rounded-lg border border-blue-100 bg-blue-50 px-3 py-2"
-                          : "rounded-lg border border-stone-200 bg-stone-50 px-3 py-2"
-                      }
-                    >
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-stone-600">
-                          {note.author_email && <span>{note.author_email}</span>}
-                          {created && (
-                            <>
-                              <span>•</span>
-                              <span>{created}</span>
-                            </>
-                          )}
-                        </div>
-                        <span
-                          className={
-                            isCustomer
-                              ? "inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-[10px] font-medium text-blue-700"
-                              : "inline-flex items-center rounded-full bg-stone-100 px-2 py-0.5 text-[10px] font-medium text-stone-700"
-                          }
-                        >
-                          {isCustomer ? "Customer note" : "Internal"}
-                        </span>
-                      </div>
-                      <p className="mt-1 text-xs text-stone-800 whitespace-pre-wrap">
-                        {note.body}
-                      </p>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
            </div>
          </div>
        )}

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import { refreshCustomerNextRenewalFromProperties } from "@/lib/customer-renewal-mirror";
+import { addOneYearToIsoDate } from "@/lib/renewal-date";
 import { recordAdminActivity } from "@/lib/record-admin-activity";
 
 type Payload = {
@@ -129,6 +130,19 @@ export async function POST(
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  if (type === "renewal" && !customerPropertyId) {
+    const { count } = await serviceClient
+      .from("customer_properties")
+      .select("id", { count: "exact", head: true })
+      .eq("customer_id", customerId);
+    if ((count ?? 0) > 0) {
+      return NextResponse.json(
+        { error: "Select which property this renewal applies to." },
+        { status: 400 },
+      );
+    }
+  }
+
   if (customerPropertyId) {
     const { data: propRow } = await serviceClient
       .from("customer_properties")
@@ -139,6 +153,17 @@ export async function POST(
     if (!propRow) {
       return NextResponse.json(
         { error: "Property not found for this customer." },
+        { status: 400 },
+      );
+    }
+  }
+
+  let nextRenewalDate: string | null = null;
+  if (type === "renewal") {
+    nextRenewalDate = addOneYearToIsoDate(date);
+    if (!nextRenewalDate) {
+      return NextResponse.json(
+        { error: "Invalid renewal date. Use YYYY-MM-DD." },
         { status: 400 },
       );
     }
@@ -165,30 +190,32 @@ export async function POST(
     );
   }
 
-  let nextRenewalDate: string | null = null;
-  if (type === "renewal" && date) {
-    const renewalDate = new Date(date);
-    if (!Number.isNaN(renewalDate.getTime())) {
-      renewalDate.setFullYear(renewalDate.getFullYear() + 1);
-      nextRenewalDate = renewalDate.toISOString().slice(0, 10);
-      if (customerPropertyId) {
-        const { error: propErr } = await serviceClient
-          .from("customer_properties")
-          .update({ next_renewal_date: nextRenewalDate })
-          .eq("id", customerPropertyId)
-          .eq("customer_id", customerId);
-        if (propErr) {
-          console.error("[transactions] Failed to update property next_renewal_date:", propErr);
-        }
-        await refreshCustomerNextRenewalFromProperties(serviceClient, customerId);
-      } else {
-        const { error: updateError } = await serviceClient
-          .from("customers")
-          .update({ next_renewal_date: nextRenewalDate })
-          .eq("id", customerId);
-        if (updateError) {
-          console.error("[transactions] Failed to update next_renewal_date:", updateError);
-        }
+  if (type === "renewal" && nextRenewalDate) {
+    if (customerPropertyId) {
+      const { error: propErr } = await serviceClient
+        .from("customer_properties")
+        .update({ next_renewal_date: nextRenewalDate })
+        .eq("id", customerPropertyId)
+        .eq("customer_id", customerId);
+      if (propErr) {
+        console.error("[transactions] Failed to update property next_renewal_date:", propErr);
+        return NextResponse.json(
+          { error: propErr.message || "Could not update property next renewal date." },
+          { status: 400 },
+        );
+      }
+      await refreshCustomerNextRenewalFromProperties(serviceClient, customerId);
+    } else {
+      const { error: updateError } = await serviceClient
+        .from("customers")
+        .update({ next_renewal_date: nextRenewalDate })
+        .eq("id", customerId);
+      if (updateError) {
+        console.error("[transactions] Failed to update next_renewal_date:", updateError);
+        return NextResponse.json(
+          { error: updateError.message || "Could not update customer next renewal date." },
+          { status: 400 },
+        );
       }
     }
   }

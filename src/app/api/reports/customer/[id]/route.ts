@@ -27,6 +27,7 @@ type Customer = {
 
 type CustomerNote = {
   id: string;
+  customer_property_id: string | null;
   body: string;
   is_customer_visible: boolean;
   author_email: string | null;
@@ -148,7 +149,9 @@ export async function GET(
 
   const { data: notesData } = await serviceClient
     .from("customer_notes")
-    .select("id, body, is_customer_visible, author_email, created_at")
+    .select(
+      "id, customer_property_id, body, is_customer_visible, author_email, created_at",
+    )
     .eq("customer_id", customerId)
     .order("created_at", { ascending: false });
 
@@ -202,6 +205,7 @@ export async function GET(
   notesSheet.columns = [
     { header: "Created at", key: "created_at", width: 24 },
     { header: "Author", key: "author_email", width: 30 },
+    { header: "Property ID", key: "customer_property_id", width: 38 },
     { header: "Visibility", key: "visibility", width: 16 },
     { header: "Body", key: "body", width: 80 },
   ];
@@ -210,6 +214,7 @@ export async function GET(
     notesSheet.addRow({
       created_at: note.created_at,
       author_email: note.author_email,
+      customer_property_id: note.customer_property_id ?? "",
       visibility: note.is_customer_visible ? "Customer" : "Internal",
       body: note.body,
     });
