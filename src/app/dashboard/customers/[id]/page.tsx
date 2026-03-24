@@ -4,6 +4,7 @@
  import Link from "next/link";
  import { useParams, useRouter } from "next/navigation";
  import { createClient } from "@/lib/supabase";
+ import { logClientAdminActivity } from "@/lib/client-admin-activity";
 
  type Customer = {
    id: string;
@@ -516,6 +517,12 @@ function joinName(title: string, first: string, last: string): string {
     setCustomer({ ...form, lifecycle_stage: lifecycleStage });
      setSaving(false);
      setSaveSuccess(true);
+    void logClientAdminActivity({
+      action: "customer.updated",
+      resourceType: "customer",
+      resourceId: customer.id,
+      summary: `Updated customer profile: ${fullName}`,
+    });
    }
 
    function updatePropertyField(
@@ -538,6 +545,12 @@ function joinName(title: string, first: string, last: string): string {
        .single();
      if (error) return;
      setProperties((prev) => [...prev, data as unknown as CustomerProperty]);
+    void logClientAdminActivity({
+      action: "property.added",
+      resourceType: "customer",
+      resourceId: id,
+      summary: `Added property for ${form?.name ?? "customer"}`,
+    });
    }
 
    async function handleSaveProperty(prop: CustomerProperty) {
@@ -566,6 +579,14 @@ function joinName(title: string, first: string, last: string): string {
      setPropertySaveSuccess(true);
      setPropertySaveError(null);
      setTimeout(() => setPropertySaveSuccess(false), 3000);
+    if (id) {
+      void logClientAdminActivity({
+        action: "property.updated",
+        resourceType: "customer",
+        resourceId: id,
+        summary: `Saved property for ${form?.name ?? "customer"}`,
+      });
+    }
    }
 
    async function handleDeleteProperty(prop: CustomerProperty) {
@@ -577,6 +598,14 @@ function joinName(title: string, first: string, last: string): string {
        .eq("id", prop.id);
      if (error) return;
      setProperties((prev) => prev.filter((p) => p.id !== prop.id));
+    if (id) {
+      void logClientAdminActivity({
+        action: "property.removed",
+        resourceType: "customer",
+        resourceId: id,
+        summary: `Removed property for ${form?.name ?? "customer"}`,
+      });
+    }
    }
 
    async function handleUploadDocument(propertyId: string, file: File) {
@@ -616,6 +645,14 @@ function joinName(title: string, first: string, last: string): string {
      setSelectedFileByPropertyId((prev) => ({ ...prev, [propertyId]: null }));
      setDocumentMessage({ type: "success", text: "Document uploaded." });
      setTimeout(() => setDocumentMessage(null), 3000);
+    if (id) {
+      void logClientAdminActivity({
+        action: "document.uploaded",
+        resourceType: "customer",
+        resourceId: id,
+        summary: `Uploaded "${file.name}" for ${form?.name ?? "customer"}`,
+      });
+    }
    }
 
    async function handleDeleteDocument(doc: PropertyDocument) {
@@ -627,6 +664,14 @@ function joinName(title: string, first: string, last: string): string {
        const list = (prev[doc.customer_property_id] ?? []).filter((d) => d.id !== doc.id);
        return { ...prev, [doc.customer_property_id]: list };
      });
+    if (id) {
+      void logClientAdminActivity({
+        action: "document.deleted",
+        resourceType: "customer",
+        resourceId: id,
+        summary: `Deleted document "${doc.file_name}" for ${form?.name ?? "customer"}`,
+      });
+    }
    }
 
    async function handleDownloadDocument(doc: PropertyDocument) {
@@ -700,6 +745,12 @@ function joinName(title: string, first: string, last: string): string {
     setNotes((prev) => [data as unknown as CustomerNote, ...prev]);
     setNewNoteBody("");
     setNewNoteCustomerVisible(false);
+    void logClientAdminActivity({
+      action: "note.added",
+      resourceType: "customer",
+      resourceId: id,
+      summary: `Added note for ${form?.name ?? "customer"}`,
+    });
   }
 
   async function handleAddTransaction() {

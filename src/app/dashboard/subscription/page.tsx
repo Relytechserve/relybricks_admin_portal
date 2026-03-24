@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase";
+import { logClientAdminActivity } from "@/lib/client-admin-activity";
 
 type SubscriptionTier = {
   id: string;
@@ -165,6 +166,13 @@ export default function SubscriptionPage() {
     setFormIsCustom(false);
     setFormCity("");
     setFormAmount("");
+
+    void logClientAdminActivity({
+      action: "subscription.tier_created",
+      resourceType: "subscription_tier",
+      resourceId: tier.id,
+      summary: `Created tier "${tier.name}" with ${formCity.trim()} price`,
+    });
   }
 
   async function handleToggleActive(tier: TierWithPrices) {
@@ -177,6 +185,12 @@ export default function SubscriptionPage() {
     setTiers((prev) =>
       prev.map((t) => (t.id === tier.id ? { ...t, is_active: !t.is_active } : t)),
     );
+    void logClientAdminActivity({
+      action: "subscription.tier_toggled",
+      resourceType: "subscription_tier",
+      resourceId: tier.id,
+      summary: `${!tier.is_active ? "Activated" : "Deactivated"} tier "${tier.name}"`,
+    });
   }
 
   async function handleSaveEdit(tier: TierWithPrices) {
@@ -206,6 +220,13 @@ export default function SubscriptionPage() {
 
     setSavingTier(false);
     setEditingTierId(null);
+
+    void logClientAdminActivity({
+      action: "subscription.tier_updated",
+      resourceType: "subscription_tier",
+      resourceId: tier.id,
+      summary: `Updated tier "${tier.name}" and prices`,
+    });
   }
 
   async function handleAddCityPrice(tier: TierWithPrices) {
@@ -232,6 +253,13 @@ export default function SubscriptionPage() {
     );
     setEditCity("");
     setEditAmount("");
+
+    void logClientAdminActivity({
+      action: "subscription.price_added",
+      resourceType: "subscription_tier",
+      resourceId: tier.id,
+      summary: `Added ${editCity.trim()} price to tier "${tier.name}"`,
+    });
   }
 
   return (

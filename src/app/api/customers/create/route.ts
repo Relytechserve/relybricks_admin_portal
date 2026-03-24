@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import { createAuthUser, deleteAuthUser } from "@/lib/supabase-auth-admin";
+import { recordAdminActivity } from "@/lib/record-admin-activity";
 
 type CreateCustomerPayload = {
   name?: string;
@@ -136,6 +137,15 @@ export async function POST(request: Request) {
     await deleteAuthUser(supabaseUrl, serviceRoleKey, authUserId);
     return NextResponse.json({ error: "Failed to link customer access profile." }, { status: 400 });
   }
+
+  await recordAdminActivity(serviceClient, {
+    actor_user_id: caller.id,
+    actor_email: caller.email ?? null,
+    action: "customer.created",
+    resource_type: "customer",
+    resource_id: createdCustomer.id,
+    summary: `Created customer account: ${createdCustomer.name} (${createdCustomer.email})`,
+  });
 
   return NextResponse.json({
     customer: createdCustomer,

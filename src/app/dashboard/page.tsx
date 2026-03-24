@@ -45,7 +45,16 @@ type DashboardStats = {
 
 type MonthCustomer = { id: string; name: string; amount: number };
 type MonthData = { month: string; label: string; revenue: number; customers: MonthCustomer[] };
-type RecentActivity = { id: string; name: string; created_at: string };
+
+type AdminActivityLogItem = {
+  id: string;
+  created_at: string;
+  actor_email: string | null;
+  action: string;
+  resource_type: string | null;
+  resource_id: string | null;
+  summary: string;
+};
 
 type DatePreset = "week" | "month" | "year" | "last_year" | "custom";
 
@@ -73,6 +82,7 @@ export default function AdminDashboardPage() {
   const [customTo, setCustomTo] = useState("");
   const [selectedMonth, setSelectedMonth] = useState<MonthData | null>(null);
   const [maxRenewalByCustomer, setMaxRenewalByCustomer] = useState<Record<string, string>>({});
+  const [activityLog, setActivityLog] = useState<AdminActivityLogItem[]>([]);
   const router = useRouter();
 
   useEffect(() => {
@@ -123,18 +133,28 @@ export default function AdminDashboardPage() {
       if (count != null) propertiesCount = count;
       setTotalProperties(propertiesCount);
 
+      const { data: activityRows, error: activityError } = await supabase
+        .from("admin_activity_log")
+        .select("id, created_at, actor_email, action, resource_type, resource_id, summary")
+        .order("created_at", { ascending: false })
+        .limit(30);
+      if (!activityError && activityRows) {
+        setActivityLog(activityRows as unknown as AdminActivityLogItem[]);
+      } else {
+        setActivityLog([]);
+      }
+
       setLoading(false);
     }
 
     load();
   }, [router]);
 
-  const { stats, chartData, recentActivity } = useMemo(() => {
+  const { stats, chartData } = useMemo(() => {
     if (totalProperties == null) {
       return {
         stats: null,
         chartData: [] as MonthData[],
-        recentActivity: [] as RecentActivity[],
       };
     }
 
@@ -247,13 +267,7 @@ export default function AdminDashboardPage() {
       totalProperties,
     };
 
-    const recentActivity: RecentActivity[] = (customers as { id?: string; name?: string; created_at?: string }[])
-      .filter((c) => c.id && c.name)
-      .sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))
-      .slice(0, 8)
-      .map((c) => ({ id: c.id!, name: c.name!, created_at: c.created_at ?? "" }));
-
-    return { stats, chartData, recentActivity };
+    return { stats, chartData };
   }, [customers, totalProperties, maxRenewalByCustomer, datePreset, customFrom, customTo]);
 
   if (loading) {
@@ -457,32 +471,45 @@ export default function AdminDashboardPage() {
         </div>
 
         <div className="bg-white rounded-xl border border-stone-200 p-4">
-          <h2 className="text-base font-semibold text-stone-900">Recent Activity</h2>
-          <p className="text-sm text-stone-500 mt-0.5">Latest updates and changes</p>
-          <ul className="mt-4 space-y-3">
-            {recentActivity.length === 0 ? (
-              <li className="text-sm text-stone-500">No recent activity.</li>
+          <h2 className="text-base font-semibold text-stone-900">Recent activity</h2>
+          <p className="text-sm text-stone-500 mt-0.5">
+            Actions by all admins (newest first). Run the latest Supabase migration if this list is empty.
+          </p>
+          <ul className="mt-4 space-y-3 max-h-80 overflow-y-auto">
+            {activityLog.length === 0 ? (
+              <li className="text-sm text-stone-500">No logged activity yet.</li>
             ) : (
-              recentActivity.map((item) => (
-                <li key={item.id} className="flex gap-3 text-sm">
-                  <div className="w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center shrink-0">
-                    <svg className="w-4 h-4 text-violet-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                    </svg>
-                  </div>
-                  <div className="min-w-0">
-                    <Link
-                      href={`/dashboard/customers/${item.id}`}
-                      className="text-stone-900 font-medium hover:text-violet-600 hover:underline"
-                    >
-                      {item.name}
-                    </Link>
-                    <p className="text-stone-500 text-xs mt-0.5">
-                      {formatRelative(item.created_at)} — Customer added
-                    </p>
-                  </div>
-                </li>
-              ))
+              activityLog.map((item) => {
+                const customerHref =
+                  item.resource_type === "customer" && item.resource_id
+                    ? `/dashboard/customers/${encodeURIComponent(item.resource_id)}`
+                    : null;
+                return (
+                  <li key={item.id} className="flex gap-3 text-sm">
+                    <div className="w-8 h-8 rounded-full bg-violet-100 flex items-center justify-center shrink-0">
+                      <svg className="w-4 h-4 text-violet-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <div className="min-w-0">
+                      <p className="text-stone-900 font-medium leading-snug">{item.summary}</p>
+                      <p className="text-stone-500 text-xs mt-0.5">
+                        <span className="text-stone-600">{item.actor_email ?? "Admin"}</span>
+                        <span className="mx-1">·</span>
+                        {formatRelative(item.created_at)}
+                        {customerHref && (
+                          <>
+                            <span className="mx-1">·</span>
+                            <Link href={customerHref} className="text-violet-600 hover:underline">
+                              Open customer
+                            </Link>
+                          </>
+                        )}
+                      </p>
+                    </div>
+                  </li>
+                );
+              })
             )}
           </ul>
         </div>

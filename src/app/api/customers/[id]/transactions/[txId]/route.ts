@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
+import { recordAdminActivity } from "@/lib/record-admin-activity";
 
 type Payload = {
   type: "renewal" | "payment" | "other";
@@ -181,6 +182,21 @@ export async function PATCH(
         .eq("id", customerId);
     }
   }
+
+  const { data: custRow } = await serviceClient
+    .from("customers")
+    .select("name")
+    .eq("id", customerId)
+    .maybeSingle();
+  const custName = (custRow as { name?: string } | null)?.name ?? "Customer";
+  await recordAdminActivity(serviceClient, {
+    actor_user_id: caller.id,
+    actor_email: caller.email ?? null,
+    action: "transaction.updated",
+    resource_type: "customer",
+    resource_id: customerId,
+    summary: `Updated ${type} transaction for ${custName}`,
+  });
 
   return NextResponse.json({ data, nextRenewalDate });
 }

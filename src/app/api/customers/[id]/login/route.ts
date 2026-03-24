@@ -7,6 +7,7 @@ import {
   deleteAuthUser,
   updateAuthUserPassword,
 } from "@/lib/supabase-auth-admin";
+import { recordAdminActivity } from "@/lib/record-admin-activity";
 
 type Payload = { action: "setup" | "reset"; password: string };
 
@@ -158,6 +159,15 @@ export async function POST(
       );
     }
 
+    await recordAdminActivity(serviceClient, {
+      actor_user_id: caller.id,
+      actor_email: caller.email ?? null,
+      action: "customer.login_setup",
+      resource_type: "customer",
+      resource_id: customerId,
+      summary: `Set up website login for ${customer.email}`,
+    });
+
     return NextResponse.json({
       success: true,
       message: `Login created for ${customer.email}. They can sign in on the website with this email and password.`,
@@ -182,6 +192,15 @@ export async function POST(
     if (error) {
       return NextResponse.json({ error }, { status: 400 });
     }
+
+    await recordAdminActivity(serviceClient, {
+      actor_user_id: caller.id,
+      actor_email: caller.email ?? null,
+      action: "customer.login_reset",
+      resource_type: "customer",
+      resource_id: customerId,
+      summary: `Reset password for ${customer.email}`,
+    });
 
     return NextResponse.json({
       success: true,
