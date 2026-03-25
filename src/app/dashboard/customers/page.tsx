@@ -5,9 +5,11 @@ import { Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
  import { useRouter, useSearchParams } from "next/navigation";
  import { createClient } from "@/lib/supabase";
  import {
-   isRenewalDueWithinDays,
-   isRenewalOverdueActiveCustomer,
-   maxRenewalDateByCustomer,
+   buildBillingUnits,
+   customerHasOverdueRenewalBilling,
+   customerHasRenewalDueWithinDays,
+   earliestNextRenewalForCustomer,
+   maxRenewalDateByCustomerProperty,
  } from "@/lib/renewal-insights";
 
  type CustomerRow = {
@@ -31,7 +33,15 @@ import { Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
    property_type: string | null;
    property_status: string | null;
    created_at: string | null;
-  updated_at?: string | null;
+   updated_at?: string | null;
+ };
+
+ type CustomerPropertyInsightRow = {
+   id: string;
+   customer_id: string;
+   subscription_date: string | null;
+   next_renewal_date: string | null;
+   package_revenue: number | null;
  };
 
  type Filters = {
@@ -74,7 +84,8 @@ type SortKey =
 
  function CustomersPageContent() {
    const [customers, setCustomers] = useState<CustomerRow[]>([]);
-   const [maxRenewalByCustomer, setMaxRenewalByCustomer] = useState<Record<string, string>>({});
+   const [propertyRows, setPropertyRows] = useState<CustomerPropertyInsightRow[]>([]);
+   const [maxRenewalByUnit, setMaxRenewalByUnit] = useState<Record<string, string>>({});
    const [loading, setLoading] = useState(true);
    const [error, setError] = useState<string | null>(null);
    const [filters, setFilters] = useState<Filters>({
@@ -171,13 +182,26 @@ type SortKey =
 
       setCustomers(data ?? []);
 
-      const { data: renewalRows } = await supabase
-        .from("transactions")
-        .select("customer_id, date")
-        .eq("type", "renewal")
-        .limit(10000);
-      setMaxRenewalByCustomer(
-        maxRenewalDateByCustomer((renewalRows ?? []) as { customer_id: string; date: string }[]),
+      const [propRes, renewalRes] = await Promise.all([
+        supabase
+          .from("customer_properties")
+          .select("id, customer_id, subscription_date, next_renewal_date, package_revenue")
+          .limit(20000),
+        supabase
+          .from("transactions")
+          .select("customer_id, customer_property_id, date")
+          .eq("type", "renewal")
+          .limit(20000),
+      ]);
+      setPropertyRows((propRes.data ?? []) as CustomerPropertyInsightRow[]);
+      setMaxRenewalByUnit(
+        maxRenewalDateByCustomerProperty(
+          (renewalRes.data ?? []) as {
+            customer_id: string;
+            customer_property_id: string | null;
+            date: string;
+          }[],
+        ),
       );
 
       setLoading(false);
@@ -210,6 +234,11 @@ type SortKey =
     [customers],
   );
 
+  const billingUnits = useMemo(
+    () => buildBillingUnits(customers, propertyRows),
+    [customers, propertyRows],
+  );
+
   function compareStrings(a: string | null | undefined, b: string | null | undefined) {
     const av = (a ?? "").toLowerCase();
     const bv = (b ?? "").toLowerCase();
@@ -229,15 +258,10 @@ type SortKey =
   const filteredCustomers = useMemo(() => {
     const result = customers.filter((c) => {
        if (renewalSegment === "soon") {
-         if (!isRenewalDueWithinDays(c.next_renewal_date, 30)) return false;
+         if (!customerHasRenewalDueWithinDays(c.id, billingUnits, 30)) return false;
        }
        if (renewalSegment === "overdue") {
-         if (
-           !isRenewalOverdueActiveCustomer(
-             { status: c.status, next_renewal_date: c.next_renewal_date },
-             maxRenewalByCustomer[c.id],
-           )
-         ) {
+         if (!customerHasOverdueRenewalBilling(c.id, billingUnits, maxRenewalByUnit)) {
            return false;
          }
        }
@@ -292,16 +316,18 @@ type SortKey =
          }
        }
 
-       if (filters.renewalFrom && c.next_renewal_date) {
-         if (c.next_renewal_date < filters.renewalFrom) {
-           return false;
-         }
-       }
-
-       if (filters.renewalTo && c.next_renewal_date) {
-         if (c.next_renewal_date > filters.renewalTo) {
-           return false;
-         }
+       if (filters.renewalFrom || filters.renewalTo) {
+         const unitDates = billingUnits
+           .filter((u) => u.customerId === c.id)
+           .map((u) => u.next_renewal_date)
+           .filter((d): d is string => Boolean(d));
+         if (unitDates.length === 0) return false;
+         const anyInRange = unitDates.some((d) => {
+           if (filters.renewalFrom && d < filters.renewalFrom) return false;
+           if (filters.renewalTo && d > filters.renewalTo) return false;
+           return true;
+         });
+         if (!anyInRange) return false;
        }
 
       return true;
@@ -334,9 +360,12 @@ type SortKey =
           cmp = compareDates(aReg, bReg);
           break;
         }
-        case "nextRenewal":
-          cmp = compareDates(a.next_renewal_date, b.next_renewal_date);
+        case "nextRenewal": {
+          const aNext = earliestNextRenewalForCustomer(a.id, billingUnits) ?? a.next_renewal_date;
+          const bNext = earliestNextRenewalForCustomer(b.id, billingUnits) ?? b.next_renewal_date;
+          cmp = compareDates(aNext, bNext);
           break;
+        }
         case "payment": {
           const aPay = getPaymentStatus(a);
           const bPay = getPaymentStatus(b);
@@ -350,7 +379,7 @@ type SortKey =
     });
 
     return sorted;
-  }, [customers, filters, sort, renewalSegment, maxRenewalByCustomer]);
+  }, [customers, billingUnits, filters, sort, renewalSegment, maxRenewalByUnit]);
 
   function handleSort(key: SortKey) {
     setSort((prev) =>
@@ -848,7 +877,8 @@ type SortKey =
                    c.subscription_date ??
                    c.created_at ??
                    "";
-                 const nextRenewalDate = c.next_renewal_date ?? "";
+                 const nextRenewalDate =
+                   earliestNextRenewalForCustomer(c.id, billingUnits) ?? c.next_renewal_date ?? "";
 
                  return (
                    <tr

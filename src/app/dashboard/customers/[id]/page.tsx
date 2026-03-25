@@ -401,21 +401,6 @@ function joinName(title: string, first: string, last: string): string {
     });
   }, [properties]);
 
-   const paymentStatus = useMemo(() => {
-     if (!form) return null;
-     if (form.payment_status) {
-       return form.payment_status;
-     }
-     const billed = form.billed_amount;
-     if (billed != null && Number(billed) > 0) return "paid";
-     return "unpaid";
-   }, [form]);
-
-   const formattedOutstanding = useMemo(
-     () => formatCurrency(form?.outstanding_amount ?? null),
-     [form?.outstanding_amount],
-   );
-
   function tiersForPropertySelect(prop: CustomerProperty) {
     return tiers.filter((t) => t.is_active || t.id === prop.subscription_tier_id);
   }
@@ -445,12 +430,16 @@ function joinName(title: string, first: string, last: string): string {
         revenue += Number(p.package_revenue);
       }
     }
+    if (properties.length === 0 && form?.package_revenue != null) {
+      const n = Number(form.package_revenue);
+      if (!Number.isNaN(n) && n > 0) revenue = n;
+    }
     return {
       earliestLabel: earliest ? formatDate(earliest) : null,
       revenueLabel: revenue > 0 ? formatCurrency(revenue) : null,
       propertyCount: properties.length,
     };
-  }, [properties, form?.next_renewal_date]);
+  }, [properties, form?.next_renewal_date, form?.package_revenue]);
 
   async function refetchAfterTransaction() {
     if (!id) return;
@@ -2005,89 +1994,34 @@ function joinName(title: string, first: string, last: string): string {
              </div>
            </div>
            <div className="space-y-4">
-            <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-3">
-              <p className="text-sm font-medium text-stone-900">Account billing</p>
-              <p className="text-xs text-stone-500 rounded-lg bg-stone-50 border border-stone-100 px-2 py-1.5">
-                <span className="font-medium text-stone-700">Rollup</span> ·{" "}
-                {propertyRollup.propertyCount} propert
-                {propertyRollup.propertyCount === 1 ? "y" : "ies"} · Earliest renewal{" "}
-                {propertyRollup.earliestLabel ?? "—"} · Total package{" "}
-                {propertyRollup.revenueLabel ?? "—"} · Plan (mirror) {form.plan_type ?? "—"}
+            <div className="bg-white rounded-xl border border-stone-200 p-4 space-y-2">
+              <p className="text-sm font-medium text-stone-900">Annual package rollup</p>
+              <p className="text-2xl font-semibold text-stone-900 tabular-nums">
+                {propertyRollup.revenueLabel ?? "—"}
               </p>
-              <div>
-                <p className="text-sm text-stone-500">Renewal status</p>
-                <select
-                  value={form.renewal_status ?? ""}
-                  onChange={(event) =>
-                    updateField(
-                      "renewal_status",
-                      (event.target.value || null) as Customer["renewal_status"],
-                    )
-                  }
-                  className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Not set</option>
-                  <option value="on_time">On time</option>
-                  <option value="overdue">Overdue</option>
-                  <option value="cancelled">Cancelled</option>
-                </select>
-              </div>
-              {customer?.contract_term_months != null && (
-                <p className="text-xs text-stone-600">
-                  Contract term:{" "}
-                  <span className="font-medium text-stone-900">
-                    {customer.contract_term_months} months
-                  </span>
-                </p>
-              )}
-              <div>
-                <p className="text-sm text-stone-500">Outstanding amount</p>
-                <p className="mt-1 text-base font-semibold text-stone-900">
-                  {formattedOutstanding ?? "None"}
-                </p>
-                <input
-                  type="number"
-                  min={0}
-                  value={form.outstanding_amount ?? ""}
-                  onChange={(event) =>
-                    updateField(
-                      "outstanding_amount",
-                      event.target.value === "" ? null : Number(event.target.value),
-                    )
-                  }
-                  className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <p className="text-sm text-stone-500">Payment status</p>
-                <p className="mt-1">
-                  <span
-                    className={
-                      paymentStatus === "paid"
-                        ? "inline-flex items-center rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-medium text-emerald-700 border border-emerald-100"
-                        : "inline-flex items-center rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-medium text-amber-700 border border-amber-100"
-                    }
-                  >
-                    {paymentStatus === "paid" ? "Paid" : "Not paid"}
-                  </span>
-                </p>
-                <select
-                  value={form.payment_status ?? ""}
-                  onChange={(event) =>
-                    updateField(
-                      "payment_status",
-                      (event.target.value || null) as Customer["payment_status"],
-                    )
-                  }
-                  className="mt-2 w-full rounded-lg border border-stone-300 px-3 py-2 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Not set</option>
-                  <option value="paid">Paid</option>
-                  <option value="partially_paid">Partially paid</option>
-                  <option value="overdue">Overdue</option>
-                  <option value="write_off">Write off</option>
-                </select>
-              </div>
+              <p className="text-xs text-stone-500 leading-relaxed">
+                {propertyRollup.propertyCount > 0 ? (
+                  <>
+                    Sum of <span className="font-medium text-stone-700">package revenue</span> across{" "}
+                    {propertyRollup.propertyCount} propert
+                    {propertyRollup.propertyCount === 1 ? "y" : "ies"} in the hub
+                    {propertyRollup.earliestLabel ? (
+                      <>
+                        {" "}
+                        · Earliest next renewal:{" "}
+                        <span className="font-medium text-stone-700">{propertyRollup.earliestLabel}</span>
+                      </>
+                    ) : null}
+                    . Edit amounts per property under{" "}
+                    <span className="font-medium text-stone-700">Properties hub</span>.
+                  </>
+                ) : (
+                  <>
+                    No property rows yet — showing customer-level package revenue if set. Add properties
+                    above to roll up from each subscription.
+                  </>
+                )}
+              </p>
             </div>
 
             {transactionFeedback && (

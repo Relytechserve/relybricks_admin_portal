@@ -6,9 +6,11 @@ import Link from "next/link";
 import type { PostgrestError } from "@supabase/supabase-js";
 import { createClient } from "@/lib/supabase";
 import {
-  isRenewalDueWithinDays,
-  isRenewalOverdueActiveCustomer,
-  maxRenewalDateByCustomer,
+  buildBillingUnits,
+  customerHasOverdueRenewalBilling,
+  customerHasRenewalDueWithinDays,
+  maxRenewalDateByCustomerProperty,
+  type BillingUnit,
 } from "@/lib/renewal-insights";
 import {
   BarChart,
@@ -56,7 +58,15 @@ type AdminActivityLogItem = {
   summary: string;
 };
 
-type DatePreset = "week" | "month" | "year" | "last_year" | "custom";
+type DatePreset = "week" | "month" | "year" | "next_year" | "last_year" | "custom";
+
+type PropertyInsightRow = {
+  id: string;
+  customer_id: string;
+  subscription_date: string | null;
+  next_renewal_date: string | null;
+  package_revenue: number | null;
+};
 
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
@@ -81,7 +91,8 @@ export default function AdminDashboardPage() {
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [selectedMonth, setSelectedMonth] = useState<MonthData | null>(null);
-  const [maxRenewalByCustomer, setMaxRenewalByCustomer] = useState<Record<string, string>>({});
+  const [propertyRows, setPropertyRows] = useState<PropertyInsightRow[]>([]);
+  const [maxRenewalByUnit, setMaxRenewalByUnit] = useState<Record<string, string>>({});
   const [activityLog, setActivityLog] = useState<AdminActivityLogItem[]>([]);
   const router = useRouter();
 
@@ -119,12 +130,27 @@ export default function AdminDashboardPage() {
 
       setCustomers(list);
 
-      const { data: renewalRows } = await supabase
-        .from("transactions")
-        .select("customer_id, date")
-        .eq("type", "renewal")
-        .limit(10000);
-      setMaxRenewalByCustomer(maxRenewalDateByCustomer((renewalRows ?? []) as { customer_id: string; date: string }[]));
+      const [propRes, renewalRes] = await Promise.all([
+        supabase
+          .from("customer_properties")
+          .select("id, customer_id, subscription_date, next_renewal_date, package_revenue")
+          .limit(20000),
+        supabase
+          .from("transactions")
+          .select("customer_id, customer_property_id, date")
+          .eq("type", "renewal")
+          .limit(20000),
+      ]);
+      setPropertyRows((propRes.data ?? []) as PropertyInsightRow[]);
+      setMaxRenewalByUnit(
+        maxRenewalDateByCustomerProperty(
+          (renewalRes.data ?? []) as {
+            customer_id: string;
+            customer_property_id: string | null;
+            date: string;
+          }[],
+        ),
+      );
 
       let propertiesCount = 0;
       const { count } = await supabase
@@ -167,11 +193,17 @@ export default function AdminDashboardPage() {
       rangeStart = new Date();
       rangeStart.setDate(today.getDate() - 6);
     } else if (datePreset === "month") {
-      rangeEnd = today;
+      // Full calendar month so future renewal dates in this month still appear on the chart
       rangeStart = new Date(today.getFullYear(), today.getMonth(), 1);
+      rangeEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
     } else if (datePreset === "year") {
-      rangeEnd = today;
+      // Full calendar year (not year-to-date) so renewals scheduled later in the year count
       rangeStart = new Date(today.getFullYear(), 0, 1);
+      rangeEnd = new Date(today.getFullYear(), 11, 31);
+    } else if (datePreset === "next_year") {
+      const y = today.getFullYear() + 1;
+      rangeStart = new Date(y, 0, 1);
+      rangeEnd = new Date(y, 11, 31);
     } else if (datePreset === "last_year") {
       const lastYear = today.getFullYear() - 1;
       rangeStart = new Date(lastYear, 0, 1);
@@ -197,16 +229,20 @@ export default function AdminDashboardPage() {
     const activeCustomers = customers.filter(
       (c) => (c.status ?? "").trim().toLowerCase() === "active",
     ).length;
-    const upcomingRenewals = customers.filter((c) =>
-      isRenewalDueWithinDays(c.next_renewal_date ?? null, 30),
-    ).length;
+    const billingUnits = buildBillingUnits(
+      customers.filter((c): c is CustomerSummary & { id: string; name?: string } =>
+        typeof c.id === "string",
+      ),
+      propertyRows,
+    );
+
+    const upcomingRenewals = customers.filter((c) => {
+      if (!c.id) return false;
+      return customerHasRenewalDueWithinDays(c.id, billingUnits, 30);
+    }).length;
     const renewalOverdue = customers.filter((c) => {
-      const id = c.id;
-      if (!id) return false;
-      return isRenewalOverdueActiveCustomer(
-        { status: c.status, next_renewal_date: c.next_renewal_date },
-        maxRenewalByCustomer[id],
-      );
+      if (!c.id) return false;
+      return customerHasOverdueRenewalBilling(c.id, billingUnits, maxRenewalByUnit);
     }).length;
     const churnRiskCustomers = customers.filter((c) => c.lifecycle_stage === "churn_risk").length;
     const overdueCustomers = customers.filter((c) => {
@@ -224,25 +260,29 @@ export default function AdminDashboardPage() {
       byMonthCustomers[m] = [];
     }
 
-    const addToMonth = (monthIndex1Based: number, c: CustomerSummary & { id?: string; name?: string }) => {
-      if (!c.package_revenue || !c.id || !c.name) return;
-      const amount = c.package_revenue;
+    const addToMonth = (monthIndex1Based: number, u: BillingUnit) => {
+      if (!u.package_revenue || !u.customerId || !u.customerName) return;
+      const amount = u.package_revenue;
       byMonth[monthIndex1Based] += amount;
-      byMonthCustomers[monthIndex1Based].push({ id: c.id, name: c.name, amount });
+      byMonthCustomers[monthIndex1Based].push({
+        id: u.customerId,
+        name: u.customerName,
+        amount,
+      });
     };
 
-    customers.forEach((c) => {
-      if (c.subscription_date) {
-        const start = new Date(c.subscription_date);
+    billingUnits.forEach((u) => {
+      if (u.subscription_date) {
+        const start = new Date(u.subscription_date);
         if (inRange(start)) {
-          addToMonth(start.getMonth() + 1, c);
+          addToMonth(start.getMonth() + 1, u);
         }
       }
 
-      if (c.next_renewal_date) {
-        const renewal = new Date(c.next_renewal_date);
+      if (u.next_renewal_date) {
+        const renewal = new Date(u.next_renewal_date);
         if (inRange(renewal)) {
-          addToMonth(renewal.getMonth() + 1, c);
+          addToMonth(renewal.getMonth() + 1, u);
         }
       }
     });
@@ -268,7 +308,7 @@ export default function AdminDashboardPage() {
     };
 
     return { stats, chartData };
-  }, [customers, totalProperties, maxRenewalByCustomer, datePreset, customFrom, customTo]);
+  }, [customers, totalProperties, propertyRows, maxRenewalByUnit, datePreset, customFrom, customTo]);
 
   if (loading) {
     return (
@@ -302,7 +342,7 @@ export default function AdminDashboardPage() {
       bg: "bg-emerald-500",
     },
     {
-      label: "Revenue in period (₹)",
+      label: "Revenue in selected range (₹)",
       value: stats.totalRevenue.toLocaleString("en-IN", { maximumFractionDigits: 0 }),
       icon: "revenue",
       bg: "bg-violet-500",
@@ -331,6 +371,7 @@ export default function AdminDashboardPage() {
             <option value="week">Last 7 days</option>
             <option value="month">This month</option>
             <option value="year">This year</option>
+            <option value="next_year">Next calendar year</option>
             <option value="last_year">Last year</option>
             <option value="custom">Custom range</option>
           </select>
@@ -394,11 +435,14 @@ export default function AdminDashboardPage() {
         <div className="lg:col-span-2 bg-white rounded-xl border border-stone-200 p-4">
           <h2 className="text-base font-semibold text-stone-900">Revenue insights</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Package revenue by calendar month when subscription start or next renewal falls in the
-            selected period —{" "}
+            Expected package revenue by calendar month when a subscription start or next renewal
+            falls in the range. Uses each <span className="font-medium text-stone-600">property</span>’s
+            dates and annual package when properties exist; otherwise the customer row. Bars are Jan–Dec;
+            amounts only accrue in months that fall inside the selected period —{" "}
             {datePreset === "week" && "last 7 days"}
-            {datePreset === "month" && "this month"}
-            {datePreset === "year" && "this year"}
+            {datePreset === "month" && "this calendar month (full month)"}
+            {datePreset === "year" && "this calendar year (Jan–Dec, including future months)"}
+            {datePreset === "next_year" && "next calendar year"}
             {datePreset === "last_year" && "last year"}
             {datePreset === "custom" && "custom date range"}
           </p>
@@ -530,7 +574,8 @@ export default function AdminDashboardPage() {
           <p className="text-sm text-orange-800 font-medium">Renewal overdue</p>
           <p className="mt-1 text-2xl font-semibold text-orange-900">{stats.renewalOverdue}</p>
           <p className="mt-1 text-xs text-orange-700">
-            Active, past next renewal date, no renewal transaction on or after that date
+            Active customer with at least one property (or legacy account) past its next renewal and no
+            renewal transaction logged for that line on or after the due date
           </p>
           <Link
             href="/dashboard/customers?renewal=overdue"
@@ -540,8 +585,11 @@ export default function AdminDashboardPage() {
           </Link>
         </div>
         <div className="bg-white rounded-xl border border-stone-200 p-4">
-          <p className="text-sm text-stone-500">Renewals in 30 days</p>
+          <p className="text-sm text-stone-500">Customers with renewal in 30 days</p>
           <p className="mt-1 text-2xl font-semibold text-stone-900">{stats.upcomingRenewals}</p>
+          <p className="mt-1 text-xs text-stone-500">
+            Any property (or legacy row) due within 30 days counts once per customer
+          </p>
           <Link href="/dashboard/customers?renewal=soon" className="text-xs text-violet-600 hover:underline mt-1 inline-block">
             View customers →
           </Link>
