@@ -1149,11 +1149,12 @@ function joinName(title: string, first: string, last: string): string {
                    <p className="text-sm text-stone-500">Email</p>
                    <input
                      type="email"
+                     autoComplete="off"
                      value={form.email}
                      onChange={(event) =>
                        updateField("email", event.target.value)
                      }
-                     className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     className="mt-1 w-full rounded-lg border border-stone-300 bg-white px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                    />
                  </div>
                  <div>
@@ -1360,7 +1361,7 @@ function joinName(title: string, first: string, last: string): string {
                                  e.target.value || null,
                                )
                              }
-                             className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             className="rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                            >
                              <option value="">Type</option>
                              <option value="apartment">Apartment</option>
@@ -1377,7 +1378,7 @@ function joinName(title: string, first: string, last: string): string {
                                  e.target.value || null,
                                )
                              }
-                             className="rounded-lg border border-stone-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             className="rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                            >
                              <option value="">Status</option>
                              <option value="Occupied">Occupied</option>
@@ -1395,7 +1396,7 @@ function joinName(title: string, first: string, last: string): string {
                                  raw === "" ? null : (parseInt(raw, 10) || null),
                                );
                              }}
-                             className="w-20 rounded-lg border border-stone-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             className="w-20 rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                            />
                            <input
                              type="text"
@@ -1404,7 +1405,7 @@ function joinName(title: string, first: string, last: string): string {
                              onChange={(e) =>
                                updatePropertyField(prop.id, "property_bhk", e.target.value || null)
                              }
-                             className="w-16 rounded-lg border border-stone-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             className="w-16 rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                            />
                            <input
                              type="text"
@@ -1417,7 +1418,7 @@ function joinName(title: string, first: string, last: string): string {
                                  e.target.value || null,
                                )
                              }
-                             className="w-24 rounded-lg border border-stone-300 px-2 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             className="w-24 rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                            />
                          </div>
                          <div className="mt-3 pt-3 border-t border-stone-200 space-y-2">

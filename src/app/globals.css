@@ -2,16 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Admin UI is light-themed only. Do not follow OS dark mode here: it only flipped
+   --foreground to a light color while cards stayed white, so inherited text looked
+   “greyed out” and native selects looked disabled (especially on macOS). */
 :root {
   --background: #ffffff;
   --foreground: #171717;
+  color-scheme: light;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  color-scheme: light;
 }
 
 body {
