@@ -10,6 +10,7 @@ import {
   customerHasOverdueRenewalBilling,
   customerHasRenewalDueWithinDays,
   maxRenewalDateByCustomerProperty,
+  todayYmdLocal,
   type BillingUnit,
 } from "@/lib/renewal-insights";
 import {
@@ -20,6 +21,7 @@ import {
   CartesianGrid,
   ResponsiveContainer,
   Cell,
+  Tooltip,
 } from "recharts";
 
 type CustomerSummary = {
@@ -45,8 +47,23 @@ type DashboardStats = {
   totalProperties: number;
 };
 
-type MonthCustomer = { id: string; name: string; amount: number };
-type MonthData = { month: string; label: string; revenue: number; customers: MonthCustomer[] };
+type MonthCustomer = {
+  id: string;
+  name: string;
+  amount: number;
+  kind: "realized" | "scheduled";
+  unitKey: string;
+};
+type MonthData = {
+  month: string;
+  label: string;
+  /** Realized (due / past) subscription revenue in this month */
+  realized: number;
+  /** Scheduled (future renewal date) — not realized yet */
+  scheduled: number;
+  revenue: number;
+  customers: MonthCustomer[];
+};
 
 type AdminActivityLogItem = {
   id: string;
@@ -69,6 +86,13 @@ type PropertyInsightRow = {
 };
 
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Which calendar month receives this unit’s annual package: next renewal, else subscription start. */
+function subscriptionAnchorYmd(u: BillingUnit): string | null {
+  if (u.next_renewal_date) return u.next_renewal_date.slice(0, 10);
+  if (u.subscription_date) return u.subscription_date.slice(0, 10);
+  return null;
+}
 
 function formatRelative(dateStr: string) {
   const date = new Date(dateStr);
@@ -253,46 +277,60 @@ export default function AdminDashboardPage() {
       );
     }).length;
 
-    const byMonth: Record<number, number> = {};
+    const byMonthRealized: Record<number, number> = {};
+    const byMonthScheduled: Record<number, number> = {};
     const byMonthCustomers: Record<number, MonthCustomer[]> = {};
     for (let m = 1; m <= 12; m++) {
-      byMonth[m] = 0;
+      byMonthRealized[m] = 0;
+      byMonthScheduled[m] = 0;
       byMonthCustomers[m] = [];
     }
 
-    const addToMonth = (monthIndex1Based: number, u: BillingUnit) => {
+    const todayYmd = todayYmdLocal();
+
+    const addToMonth = (
+      monthIndex1Based: number,
+      u: BillingUnit,
+      kind: "realized" | "scheduled",
+    ) => {
       if (!u.package_revenue || !u.customerId || !u.customerName) return;
       const amount = u.package_revenue;
-      byMonth[monthIndex1Based] += amount;
+      const unitKey = `${u.customerId}|${u.propertyId ?? "legacy"}`;
+      if (kind === "scheduled") {
+        byMonthScheduled[monthIndex1Based] += amount;
+      } else {
+        byMonthRealized[monthIndex1Based] += amount;
+      }
       byMonthCustomers[monthIndex1Based].push({
         id: u.customerId,
         name: u.customerName,
         amount,
+        kind,
+        unitKey,
       });
     };
 
     billingUnits.forEach((u) => {
-      if (u.subscription_date) {
-        const start = new Date(u.subscription_date);
-        if (inRange(start)) {
-          addToMonth(start.getMonth() + 1, u);
-        }
-      }
-
-      if (u.next_renewal_date) {
-        const renewal = new Date(u.next_renewal_date);
-        if (inRange(renewal)) {
-          addToMonth(renewal.getMonth() + 1, u);
-        }
-      }
+      const anchor = subscriptionAnchorYmd(u);
+      if (!anchor) return;
+      const d = new Date(`${anchor}T12:00:00`);
+      if (!inRange(d)) return;
+      const kind: "realized" | "scheduled" = anchor > todayYmd ? "scheduled" : "realized";
+      addToMonth(d.getMonth() + 1, u, kind);
     });
 
-    const chartData: MonthData[] = MONTH_LABELS.map((label, i) => ({
-      month: String(i + 1),
-      label,
-      revenue: byMonth[i + 1] ?? 0,
-      customers: byMonthCustomers[i + 1] ?? [],
-    }));
+    const chartData: MonthData[] = MONTH_LABELS.map((label, i) => {
+      const realized = byMonthRealized[i + 1] ?? 0;
+      const scheduled = byMonthScheduled[i + 1] ?? 0;
+      return {
+        month: String(i + 1),
+        label,
+        realized,
+        scheduled,
+        revenue: realized + scheduled,
+        customers: byMonthCustomers[i + 1] ?? [],
+      };
+    });
 
     const periodRevenue = chartData.reduce((sum, m) => sum + m.revenue, 0);
 
@@ -342,7 +380,7 @@ export default function AdminDashboardPage() {
       bg: "bg-emerald-500",
     },
     {
-      label: "Revenue in selected range (₹)",
+      label: "Subscription revenue in selected range (₹)",
       value: stats.totalRevenue.toLocaleString("en-IN", { maximumFractionDigits: 0 }),
       icon: "revenue",
       bg: "bg-violet-500",
@@ -433,12 +471,13 @@ export default function AdminDashboardPage() {
 
       <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 bg-white rounded-xl border border-stone-200 p-4">
-          <h2 className="text-base font-semibold text-stone-900">Revenue insights</h2>
+          <h2 className="text-base font-semibold text-stone-900">Subscription revenue</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Expected package revenue by calendar month when a subscription start or next renewal
-            falls in the range. Uses each <span className="font-medium text-stone-600">property</span>’s
-            dates and annual package when properties exist; otherwise the customer row. Bars are Jan–Dec;
-            amounts only accrue in months that fall inside the selected period —{" "}
+            Annual package amount per billing unit in the month of its next renewal (or subscription start
+            if no renewal date). Each property rolls up separately; legacy customers without properties use
+            the customer row.             <span className="font-medium text-stone-600">Teal</span> is realized or due
+            today; <span className="font-medium text-stone-600">amber</span> is scheduled (future renewal).
+            Bars are Jan–Dec; amounts only accrue in months inside the selected period —{" "}
             {datePreset === "week" && "last 7 days"}
             {datePreset === "month" && "this calendar month (full month)"}
             {datePreset === "year" && "this calendar year (Jan–Dec, including future months)"}
@@ -460,18 +499,60 @@ export default function AdminDashboardPage() {
                       `₹${Math.round(v).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`
                     }
                   />
-                  <Bar dataKey="revenue" fill="#14b8a6" radius={[4, 4, 0, 0]} name="Revenue">
+                  <Tooltip
+                    formatter={(value, name) => [
+                      `₹${Math.round(Number(value ?? 0)).toLocaleString("en-IN", { maximumFractionDigits: 0 })}`,
+                      name ?? "",
+                    ]}
+                    labelFormatter={(label) => label}
+                    contentStyle={{ fontSize: 12 }}
+                  />
+                  <Bar
+                    dataKey="realized"
+                    stackId="sub"
+                    name="Realized / due"
+                    radius={[0, 0, 0, 0]}
+                  >
                     {chartData.map((entry) => (
                       <Cell
-                        key={entry.month}
-                        fill={selectedMonth?.month === entry.month ? "#0d9488" : "#14b8a6"}
-                        onClick={() => setSelectedMonth((prev) => (prev?.month === entry.month ? null : entry))}
+                        key={`r-${entry.month}`}
+                        fill={selectedMonth?.month === entry.month ? "#0f766e" : "#0d9488"}
+                        onClick={() =>
+                          setSelectedMonth((prev) => (prev?.month === entry.month ? null : entry))
+                        }
+                        style={{ cursor: "pointer" }}
+                      />
+                    ))}
+                  </Bar>
+                  <Bar
+                    dataKey="scheduled"
+                    stackId="sub"
+                    name="Scheduled (future)"
+                    radius={[4, 4, 0, 0]}
+                  >
+                    {chartData.map((entry) => (
+                      <Cell
+                        key={`s-${entry.month}`}
+                        fill={selectedMonth?.month === entry.month ? "#d97706" : "#fbbf24"}
+                        onClick={() =>
+                          setSelectedMonth((prev) => (prev?.month === entry.month ? null : entry))
+                        }
                         style={{ cursor: "pointer" }}
                       />
                     ))}
                   </Bar>
                 </BarChart>
               </ResponsiveContainer>
+              <div className="mt-2 flex flex-wrap gap-4 text-xs text-stone-600">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 rounded-sm bg-teal-600" aria-hidden />
+                  Realized / due
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 rounded-sm bg-amber-400" aria-hidden />
+                  Scheduled (not yet realized)
+                </span>
+              </div>
             </div>
             <div
               className={`w-56 h-64 shrink-0 border border-stone-200 rounded-lg bg-stone-50 transition-opacity ${
@@ -482,15 +563,37 @@ export default function AdminDashboardPage() {
                 <div className="p-3 h-full flex flex-col min-h-0">
                   <p className="text-sm font-semibold text-stone-900">{selectedMonth.label}</p>
                   <p className="text-xs text-stone-600 mt-0.5">
-                    ₹{Math.round(selectedMonth.revenue).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                    Total ₹
+                    {Math.round(selectedMonth.revenue).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
                   </p>
+                  {(selectedMonth.realized > 0 || selectedMonth.scheduled > 0) && (
+                    <p className="text-[11px] text-stone-500 mt-0.5">
+                      {selectedMonth.realized > 0 && (
+                        <span>
+                          Realized ₹
+                          {Math.round(selectedMonth.realized).toLocaleString("en-IN", {
+                            maximumFractionDigits: 0,
+                          })}
+                        </span>
+                      )}
+                      {selectedMonth.realized > 0 && selectedMonth.scheduled > 0 && " · "}
+                      {selectedMonth.scheduled > 0 && (
+                        <span>
+                          Scheduled ₹
+                          {Math.round(selectedMonth.scheduled).toLocaleString("en-IN", {
+                            maximumFractionDigits: 0,
+                          })}
+                        </span>
+                      )}
+                    </p>
+                  )}
                   <div className="mt-2 flex-1 min-h-0 overflow-y-auto">
                     {selectedMonth.customers.length === 0 ? (
                       <p className="text-xs text-stone-500">No customers</p>
                     ) : (
                       <ul className="space-y-1.5 text-xs">
                         {selectedMonth.customers.map((c) => (
-                          <li key={c.id}>
+                          <li key={c.unitKey}>
                             <Link
                               href={`/dashboard/customers/${c.id}`}
                               className="text-stone-800 hover:text-violet-600 hover:underline block truncate"
@@ -498,7 +601,12 @@ export default function AdminDashboardPage() {
                             >
                               {c.name}
                             </Link>
-                            <span className="text-stone-500">₹{c.amount.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</span>
+                            <span className="text-stone-500">
+                              ₹{c.amount.toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                              {c.kind === "scheduled" && (
+                                <span className="ml-1 text-amber-700">(scheduled)</span>
+                              )}
+                            </span>
                           </li>
                         ))}
                       </ul>

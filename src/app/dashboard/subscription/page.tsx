@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase";
 import { logClientAdminActivity } from "@/lib/client-admin-activity";
@@ -271,6 +272,12 @@ export default function SubscriptionPage() {
             Manage your subscription pricing and features.
           </p>
         </div>
+        <Link
+          href="/dashboard/subscription/mismatches"
+          className="text-sm font-medium text-violet-700 hover:underline shrink-0"
+        >
+          Package amount mismatches
+        </Link>
       </div>
 
       <div className="mt-6 bg-white rounded-xl border border-stone-200 p-4 space-y-3">

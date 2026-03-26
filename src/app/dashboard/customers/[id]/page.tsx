@@ -6,6 +6,7 @@
  import { createClient } from "@/lib/supabase";
  import { logClientAdminActivity } from "@/lib/client-admin-activity";
  import { syncCustomerSubscriptionMirrorFromProperties } from "@/lib/sync-customer-subscription-mirror";
+ import { resolveTierPriceForCity } from "@/lib/subscription-tier-pricing";
  import AddPropertyTransactionForm from "./AddPropertyTransactionForm";
 
  type Customer = {
@@ -491,19 +492,10 @@ function joinName(title: string, first: string, last: string): string {
     tierId: string | null | undefined,
     city: string | null | undefined,
   ): SubscriptionTierPrice | null {
-    if (!tierId) return null;
-    const cityName = (city ?? "").trim();
-    if (cityName) {
-      const match = tierPrices.find(
-        (p) =>
-          p.tier_id === tierId &&
-          p.is_active &&
-          p.city.toLowerCase() === cityName.toLowerCase(),
-      );
-      if (match) return match;
-    }
-    const anyPrice = tierPrices.find((p) => p.tier_id === tierId && p.is_active);
-    return anyPrice ?? null;
+    const r = resolveTierPriceForCity(tierPrices, tierId, city);
+    if (!r) return null;
+    const { matchedCity: _matchedCity, ...rest } = r;
+    return rest as SubscriptionTierPrice;
   }
 
   function computeLifecycleStage(value: Customer): string | null {
