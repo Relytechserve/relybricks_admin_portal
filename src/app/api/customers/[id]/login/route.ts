@@ -89,7 +89,7 @@ export async function POST(
 
   const { data: customer, error: fetchError } = await serviceClient
     .from("customers")
-    .select("id, email, auth_user_id")
+    .select("id, email, auth_user_id, archived_at")
     .eq("id", customerId)
     .maybeSingle();
 
@@ -104,6 +104,13 @@ export async function POST(
     return NextResponse.json(
       { error: `No customer found with id ${customerId}. The customer may have been deleted or the link is incorrect.` },
       { status: 404 },
+    );
+  }
+
+  if ((customer as { archived_at?: string | null }).archived_at) {
+    return NextResponse.json(
+      { error: "This customer has been archived. Restore is not available from this screen." },
+      { status: 410 },
     );
   }
 

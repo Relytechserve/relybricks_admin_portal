@@ -130,6 +130,19 @@ export async function POST(
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  const { data: custActive } = await serviceClient
+    .from("customers")
+    .select("id")
+    .eq("id", customerId)
+    .is("archived_at", null)
+    .maybeSingle();
+  if (!custActive) {
+    return NextResponse.json(
+      { error: "Customer not found or has been archived." },
+      { status: 404 },
+    );
+  }
+
   if (type === "renewal" && !customerPropertyId) {
     const { count } = await serviceClient
       .from("customer_properties")

@@ -142,6 +142,19 @@ export async function PATCH(
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  const { data: custActive } = await serviceClient
+    .from("customers")
+    .select("id")
+    .eq("id", customerId)
+    .is("archived_at", null)
+    .maybeSingle();
+  if (!custActive) {
+    return NextResponse.json(
+      { error: "Customer not found or has been archived." },
+      { status: 404 },
+    );
+  }
+
   const { data: existingTx } = await serviceClient
     .from("transactions")
     .select("customer_property_id")

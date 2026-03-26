@@ -14,5 +14,9 @@ export async function refreshCustomerNextRenewalFromProperties(
     .filter((d): d is string => Boolean(d));
   if (dates.length === 0) return;
   dates.sort();
-  await serviceClient.from("customers").update({ next_renewal_date: dates[0] }).eq("id", customerId);
+  await serviceClient
+    .from("customers")
+    .update({ next_renewal_date: dates[0] })
+    .eq("id", customerId)
+    .is("archived_at", null);
 }

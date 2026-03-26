@@ -14,6 +14,9 @@
    name: string;
    email: string;
    auth_user_id: string | null;
+  /** When set, customer is archived (read-only in UI; email may be reused). */
+  archived_at?: string | null;
+  archived_reason?: string | null;
   source: string | null;
   segment: string | null;
   lifecycle_stage: string | null;
@@ -218,6 +221,10 @@ function joinName(title: string, first: string, last: string): string {
   const [editTxReason, setEditTxReason] = useState("");
   const [savingEditTx, setSavingEditTx] = useState(false);
   const [editTxError, setEditTxError] = useState<string | null>(null);
+  const [showArchiveModal, setShowArchiveModal] = useState(false);
+  const [archiveReasonInput, setArchiveReasonInput] = useState("");
+  const [archiving, setArchiving] = useState(false);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
 
    const id = params?.id;
 
@@ -279,6 +286,8 @@ function joinName(title: string, first: string, last: string): string {
              "next_follow_up_at",
              "payment_status",
              "notes",
+            "archived_at",
+            "archived_reason",
            ].join(", "),
          )
          .eq("id", id)
@@ -522,7 +531,7 @@ function joinName(title: string, first: string, last: string): string {
    }
 
    async function handleSave() {
-    if (!form || !customer) return;
+    if (!form || !customer || form.archived_at) return;
      setSaving(true);
      setSaveError(null);
      setSaveSuccess(false);
@@ -591,7 +600,7 @@ function joinName(title: string, first: string, last: string): string {
    }
 
    async function handleAddProperty() {
-     if (!id) return;
+     if (!id || customer?.archived_at) return;
      const supabase = createClient();
      const { data, error } = await supabase
        .from("customer_properties")
@@ -611,6 +620,10 @@ function joinName(title: string, first: string, last: string): string {
    }
 
    async function handleSaveProperty(prop: CustomerProperty) {
+     if (customer?.archived_at) {
+       setPropertySaveError("This customer is archived and cannot be edited.");
+       return;
+     }
      setPropertySavingId(prop.id);
      setPropertySaveError(null);
      setPropertySaveSuccess(false);
@@ -691,6 +704,7 @@ function joinName(title: string, first: string, last: string): string {
    }
 
    async function handleDeleteProperty(prop: CustomerProperty) {
+     if (customer?.archived_at) return;
      if (!confirm("Remove this property?")) return;
      const supabase = createClient();
      const { error } = await supabase
@@ -710,6 +724,7 @@ function joinName(title: string, first: string, last: string): string {
    }
 
    async function handleUploadDocument(propertyId: string, file: File) {
+     if (customer?.archived_at) return;
      setDocumentUploadingPropertyId(propertyId);
      setDocumentMessage(null);
      const supabase = createClient();
@@ -782,6 +797,10 @@ function joinName(title: string, first: string, last: string): string {
    }
 
   async function handleCustomerLogin(action: "setup" | "reset") {
+    if (form?.archived_at) {
+      setLoginError("This customer is archived.");
+      return;
+    }
     if (!id || !loginPassword.trim() || loginPassword.length < 8) {
       setLoginError("Password must be at least 8 characters.");
       return;
@@ -828,7 +847,7 @@ function joinName(title: string, first: string, last: string): string {
     onSuccessClear?: () => void;
   }) {
     const { customerPropertyId, body, customerVisible, onSuccessClear } = params;
-    if (!id || !body.trim()) return;
+    if (!id || !body.trim() || form?.archived_at) return;
     const savingKey = customerPropertyId ?? "account";
     setNoteSavingKey(savingKey);
     const supabase = createClient();
@@ -864,6 +883,7 @@ function joinName(title: string, first: string, last: string): string {
   }
 
   function openEditTransaction(tx: CustomerTransaction) {
+    if (form?.archived_at) return;
     setEditingTransactionId(tx.id);
     setEditTxType(tx.type);
     setEditTxDate(tx.date);
@@ -878,8 +898,35 @@ function joinName(title: string, first: string, last: string): string {
     setEditTxError(null);
   }
 
+  async function handleConfirmArchive() {
+    if (!id) return;
+    setArchiving(true);
+    setArchiveError(null);
+    try {
+      const res = await fetch(`/api/customers/${encodeURIComponent(id)}/archive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: archiveReasonInput.trim() || null }),
+      });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) {
+        setArchiveError(data.error ?? "Failed to archive customer.");
+        return;
+      }
+      router.push("/dashboard/customers");
+    } catch {
+      setArchiveError("Failed to archive customer.");
+    } finally {
+      setArchiving(false);
+    }
+  }
+
   async function handleEditTransaction() {
     if (!id || !editingTransactionId || !editTxDate) return;
+    if (form?.archived_at) {
+      setEditTxError("This customer is archived.");
+      return;
+    }
     if (!editTxReason.trim()) {
       setEditTxError("Edit reason is required.");
       return;
@@ -928,6 +975,8 @@ function joinName(title: string, first: string, last: string): string {
     }
   }
 
+  const isArchived = Boolean(form?.archived_at);
+
    return (
      <div>
        <div className="flex items-center gap-2 text-sm text-stone-600">
@@ -947,6 +996,30 @@ function joinName(title: string, first: string, last: string): string {
         View and enrich key information for this customer.
        </p>
 
+       {!loading && !error && form && isArchived && (
+         <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+           <p className="font-semibold">Archived customer</p>
+           <p className="mt-1 text-amber-900/90">
+             This record is read-only. Login has been removed; properties and transactions are kept for
+             audit. You can create a new customer with the same email.
+           </p>
+           {form.archived_reason ? (
+             <p className="mt-2 text-xs text-amber-900/80">
+               Reason: {form.archived_reason}
+             </p>
+           ) : null}
+           <p className="mt-1 text-xs text-amber-800/80">
+             Archived{" "}
+             {form.archived_at
+               ? new Date(form.archived_at).toLocaleString("en-IN", {
+                   dateStyle: "medium",
+                   timeStyle: "short",
+                 })
+               : ""}
+           </p>
+         </div>
+       )}
+
        {!loading && !error && form && (
          <div className="mt-3 flex flex-wrap items-center gap-3">
            <button
@@ -959,6 +1032,19 @@ function joinName(title: string, first: string, last: string): string {
            >
              Export to Excel
            </button>
+           {!isArchived && (
+             <button
+               type="button"
+               onClick={() => {
+                 setShowArchiveModal(true);
+                 setArchiveError(null);
+                 setArchiveReasonInput("");
+               }}
+               className="inline-flex items-center rounded-lg border border-red-200 bg-white px-3 py-1.5 text-xs font-medium text-red-800 hover:bg-red-50"
+             >
+               Archive customer…
+             </button>
+           )}
          </div>
        )}
 
@@ -967,7 +1053,7 @@ function joinName(title: string, first: string, last: string): string {
            <button
              type="button"
              onClick={handleSave}
-             disabled={saving || !form}
+             disabled={saving || !form || isArchived}
              className="inline-flex items-center rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-blue-500 disabled:opacity-60"
            >
              {saving ? "Saving…" : "Save changes"}
@@ -994,7 +1080,9 @@ function joinName(title: string, first: string, last: string): string {
        )}
 
        {!loading && !error && form && (
-         <div className="mt-6 grid gap-4 md:grid-cols-3">
+         <div
+           className={`mt-6 grid gap-4 md:grid-cols-3${isArchived ? " pointer-events-none opacity-[0.88]" : ""}`}
+         >
            <div className="md:col-span-2 space-y-4">
              <div className="bg-white rounded-xl border border-stone-200 p-4">
                <div className="flex items-center justify-between gap-2">
@@ -1031,14 +1119,15 @@ function joinName(title: string, first: string, last: string): string {
                      }}
                      placeholder="Min 8 characters"
                      minLength={8}
-                     className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                     disabled={isArchived}
+                     className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
                    />
                  </div>
                  {form.auth_user_id ? (
                    <button
                      type="button"
                      onClick={() => handleCustomerLogin("reset")}
-                     disabled={loginLoading || loginPassword.length < 8}
+                     disabled={isArchived || loginLoading || loginPassword.length < 8}
                      className="rounded-lg bg-stone-700 px-4 py-2 text-sm font-medium text-white hover:bg-stone-600 disabled:opacity-50"
                    >
                      {loginLoading ? "Resetting…" : "Reset password"}
@@ -1047,7 +1136,7 @@ function joinName(title: string, first: string, last: string): string {
                    <button
                      type="button"
                      onClick={() => handleCustomerLogin("setup")}
-                     disabled={loginLoading || loginPassword.length < 8}
+                     disabled={isArchived || loginLoading || loginPassword.length < 8}
                      className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-500 disabled:opacity-50"
                    >
                      {loginLoading ? "Setting up…" : "Set up login"}
@@ -1196,7 +1285,8 @@ function joinName(title: string, first: string, last: string): string {
                    <button
                      type="button"
                      onClick={handleAddProperty}
-                     className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50"
+                     disabled={isArchived}
+                     className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-700 hover:bg-stone-50 disabled:opacity-50"
                    >
                      Add property
                    </button>
@@ -1606,6 +1696,7 @@ function joinName(title: string, first: string, last: string): string {
                                  })
                                }
                                disabled={
+                                 isArchived ||
                                  noteSavingKey === prop.id ||
                                  !(propertyNoteBody[prop.id] ?? "").trim()
                                }
@@ -1619,7 +1710,7 @@ function joinName(title: string, first: string, last: string): string {
                            <button
                              type="button"
                              onClick={() => handleSaveProperty(prop)}
-                             disabled={propertySavingId === prop.id}
+                             disabled={isArchived || propertySavingId === prop.id}
                              className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-500 disabled:opacity-60"
                            >
                              {propertySavingId === prop.id ? "Saving…" : "Save property"}
@@ -1627,7 +1718,8 @@ function joinName(title: string, first: string, last: string): string {
                            <button
                              type="button"
                              onClick={() => handleDeleteProperty(prop)}
-                             className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-50"
+                             disabled={isArchived}
+                             className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-xs font-medium text-stone-600 hover:bg-stone-50 disabled:opacity-50"
                            >
                              Remove property
                            </button>
@@ -1642,6 +1734,7 @@ function joinName(title: string, first: string, last: string): string {
                            <AddPropertyTransactionForm
                              customerId={id!}
                              customerPropertyId={prop.id}
+                             disabled={isArchived}
                              onSuccess={mergeTransactionSuccess}
                              onError={(msg) =>
                                setTransactionFeedback(
@@ -1764,7 +1857,8 @@ function joinName(title: string, first: string, last: string): string {
                                            <button
                                              type="button"
                                              onClick={() => openEditTransaction(tx)}
-                                             className="text-[10px] text-blue-600 hover:underline"
+                                             disabled={isArchived}
+                                             className="text-[10px] text-blue-600 hover:underline disabled:opacity-40 disabled:no-underline"
                                            >
                                              Edit
                                            </button>
@@ -1889,7 +1983,7 @@ function joinName(title: string, first: string, last: string): string {
                         },
                       })
                     }
-                    disabled={noteSavingKey === "account" || !newNoteBody.trim()}
+                    disabled={isArchived || noteSavingKey === "account" || !newNoteBody.trim()}
                     className="inline-flex items-center rounded-lg bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
                   >
                     {noteSavingKey === "account" ? "Saving…" : "Add note"}
@@ -2043,6 +2137,7 @@ function joinName(title: string, first: string, last: string): string {
                 <AddPropertyTransactionForm
                   customerId={id}
                   customerPropertyId={null}
+                  disabled={isArchived}
                   onSuccess={mergeTransactionSuccess}
                   onError={(msg) =>
                     setTransactionFeedback(msg ? { ok: false, msg } : null)
@@ -2140,7 +2235,8 @@ function joinName(title: string, first: string, last: string): string {
                           <button
                             type="button"
                             onClick={() => openEditTransaction(tx)}
-                            className="text-blue-600 hover:underline"
+                            disabled={isArchived}
+                            className="text-blue-600 hover:underline disabled:opacity-40 disabled:no-underline"
                           >
                             Edit
                           </button>
@@ -2171,6 +2267,53 @@ function joinName(title: string, first: string, last: string): string {
            </div>
          </div>
        )}
+
+      {showArchiveModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
+          <div
+            className="bg-white rounded-xl border border-stone-200 max-w-md w-full p-5 shadow-lg"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="archive-dialog-title"
+          >
+            <h3 id="archive-dialog-title" className="text-base font-semibold text-stone-900">
+              Archive this customer?
+            </h3>
+            <p className="mt-2 text-sm text-stone-600">
+              Their login will be removed, they will disappear from lists and company reports, and
+              properties and transactions stay in the database for audit. You can create a new customer
+              with the same email afterward.
+            </p>
+            <label className="block mt-3 text-xs font-medium text-stone-600">Reason (optional)</label>
+            <textarea
+              value={archiveReasonInput}
+              onChange={(e) => setArchiveReasonInput(e.target.value)}
+              rows={3}
+              className="mt-1 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-violet-500"
+              placeholder="e.g. Requested removal, duplicate account…"
+            />
+            {archiveError && <p className="mt-2 text-sm text-red-600">{archiveError}</p>}
+            <div className="mt-4 flex flex-wrap justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowArchiveModal(false)}
+                disabled={archiving}
+                className="rounded-lg border border-stone-300 bg-white px-4 py-2 text-sm font-medium text-stone-800 hover:bg-stone-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmArchive()}
+                disabled={archiving}
+                className="rounded-lg bg-red-700 px-4 py-2 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-50"
+              >
+                {archiving ? "Archiving…" : "Archive customer"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
      </div>
    );
  }

@@ -69,7 +69,8 @@ export default function SubscriptionAmountMismatchesPage() {
 
       const { data: customerRows, error: custErr } = await supabase
         .from("customers")
-        .select("id, name, subscription_tier_id, package_revenue, property_city");
+        .select("id, name, subscription_tier_id, package_revenue, property_city")
+        .is("archived_at", null);
 
       if (custErr) {
         setError("Could not load customers.");

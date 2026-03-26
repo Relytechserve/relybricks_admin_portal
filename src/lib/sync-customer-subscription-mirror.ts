@@ -8,6 +8,13 @@ export async function syncCustomerSubscriptionMirrorFromProperties(
   supabase: SupabaseClient,
   customerId: string,
 ) {
+  const { data: cust } = await supabase
+    .from("customers")
+    .select("archived_at")
+    .eq("id", customerId)
+    .maybeSingle();
+  if ((cust as { archived_at?: string | null } | null)?.archived_at) return;
+
   const { data: props } = await supabase
     .from("customer_properties")
     .select(
@@ -50,5 +57,6 @@ export async function syncCustomerSubscriptionMirrorFromProperties(
       next_renewal_date,
       package_revenue,
     })
-    .eq("id", customerId);
+    .eq("id", customerId)
+    .is("archived_at", null);
 }

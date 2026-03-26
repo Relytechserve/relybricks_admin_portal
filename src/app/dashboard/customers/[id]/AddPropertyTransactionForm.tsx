@@ -22,6 +22,8 @@ type Props = {
   customerPropertyId: string | null;
   onSuccess: (payload: AddTxSuccessPayload) => void;
   onError: (message: string | null) => void;
+  /** When true (e.g. archived customer), form is read-only */
+  disabled?: boolean;
 };
 
 export default function AddPropertyTransactionForm({
@@ -29,6 +31,7 @@ export default function AddPropertyTransactionForm({
   customerPropertyId,
   onSuccess,
   onError,
+  disabled = false,
 }: Props) {
   const [type, setType] = useState<TxType>("renewal");
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
@@ -37,6 +40,7 @@ export default function AddPropertyTransactionForm({
   const [saving, setSaving] = useState(false);
 
   async function handleSubmit() {
+    if (disabled) return;
     if (!date) return;
     setSaving(true);
     onError(null);
@@ -84,7 +88,8 @@ export default function AddPropertyTransactionForm({
           <select
             value={type}
             onChange={(e) => setType(e.target.value as TxType)}
-            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+            disabled={disabled}
+            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs disabled:opacity-50"
           >
             <option value="renewal">Renewal</option>
             <option value="payment">Payment</option>
@@ -97,7 +102,8 @@ export default function AddPropertyTransactionForm({
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
-            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+            disabled={disabled}
+            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs disabled:opacity-50"
           />
         </div>
       </div>
@@ -110,7 +116,8 @@ export default function AddPropertyTransactionForm({
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             placeholder="INR"
-            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+            disabled={disabled}
+            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs disabled:opacity-50"
           />
         </div>
         <div>
@@ -119,14 +126,15 @@ export default function AddPropertyTransactionForm({
             type="text"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs"
+            disabled={disabled}
+            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs disabled:opacity-50"
           />
         </div>
       </div>
       <button
         type="button"
         onClick={() => void handleSubmit()}
-        disabled={saving || !date}
+        disabled={disabled || saving || !date}
         className="rounded bg-stone-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-stone-800 disabled:opacity-50"
       >
         {saving ? "Adding…" : "Add entry"}

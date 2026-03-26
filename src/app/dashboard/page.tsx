@@ -141,6 +141,7 @@ export default function AdminDashboardPage() {
         .select(
           "id, status, plan_type, subscription_date, next_renewal_date, package_revenue, lifecycle_stage, payment_status, outstanding_amount, created_at, name",
         )
+        .is("archived_at", null)
         .order("created_at", { ascending: false })
         .limit(10000)) as { data: (CustomerSummary & { id?: string; name?: string })[] | null; error: PostgrestError | null };
 
@@ -154,6 +155,8 @@ export default function AdminDashboardPage() {
 
       setCustomers(list);
 
+      const activeIds = new Set(list.map((c) => c.id).filter((id): id is string => Boolean(id)));
+
       const [propRes, renewalRes] = await Promise.all([
         supabase
           .from("customer_properties")
@@ -165,10 +168,11 @@ export default function AdminDashboardPage() {
           .eq("type", "renewal")
           .limit(20000),
       ]);
-      setPropertyRows((propRes.data ?? []) as PropertyInsightRow[]);
+      const propRows = (propRes.data ?? []).filter((p) => activeIds.has(p.customer_id));
+      setPropertyRows(propRows as PropertyInsightRow[]);
       setMaxRenewalByUnit(
         maxRenewalDateByCustomerProperty(
-          (renewalRes.data ?? []) as {
+          (renewalRes.data ?? []).filter((t) => activeIds.has(t.customer_id)) as {
             customer_id: string;
             customer_property_id: string | null;
             date: string;
@@ -177,10 +181,13 @@ export default function AdminDashboardPage() {
       );
 
       let propertiesCount = 0;
-      const { count } = await supabase
-        .from("customer_properties")
-        .select("id", { count: "exact", head: true });
-      if (count != null) propertiesCount = count;
+      if (activeIds.size > 0) {
+        const { count } = await supabase
+          .from("customer_properties")
+          .select("id", { count: "exact", head: true })
+          .in("customer_id", Array.from(activeIds));
+        if (count != null) propertiesCount = count;
+      }
       setTotalProperties(propertiesCount);
 
       const { data: activityRows, error: activityError } = await supabase

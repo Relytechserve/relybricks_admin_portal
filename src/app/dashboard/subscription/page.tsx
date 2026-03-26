@@ -89,7 +89,8 @@ export default function SubscriptionPage() {
       for (const id of tierIds) countsByTier[id] = 0;
       const { data: customerRows } = await supabase
         .from("customers")
-        .select("subscription_tier_id");
+        .select("subscription_tier_id")
+        .is("archived_at", null);
       if (Array.isArray(customerRows)) {
         (customerRows as { subscription_tier_id: string | null }[]).forEach((row) => {
           if (row.subscription_tier_id && countsByTier[row.subscription_tier_id] != null) {

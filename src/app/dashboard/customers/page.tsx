@@ -164,12 +164,14 @@ type SortKey =
 
       const { data: fullData, error: fullError } = await supabase
         .from("customers")
-        .select(allColumns.join(", "));
+        .select(allColumns.join(", "))
+        .is("archived_at", null);
 
       if (fullError) {
         const { data: fallbackData, error: fallbackError } = await supabase
           .from("customers")
-          .select(baseColumns.join(", "));
+          .select(baseColumns.join(", "))
+          .is("archived_at", null);
         if (fallbackError) {
           setError("Failed to load customers.");
           setLoading(false);
@@ -180,7 +182,9 @@ type SortKey =
         data = (fullData ?? []) as unknown as CustomerRow[];
       }
 
-      setCustomers(data ?? []);
+      const activeList = data ?? [];
+      const activeIds = new Set(activeList.map((c) => c.id));
+      setCustomers(activeList);
 
       const [propRes, renewalRes] = await Promise.all([
         supabase
@@ -193,10 +197,12 @@ type SortKey =
           .eq("type", "renewal")
           .limit(20000),
       ]);
-      setPropertyRows((propRes.data ?? []) as CustomerPropertyInsightRow[]);
+      setPropertyRows(
+        (propRes.data ?? []).filter((p) => activeIds.has(p.customer_id)) as CustomerPropertyInsightRow[],
+      );
       setMaxRenewalByUnit(
         maxRenewalDateByCustomerProperty(
-          (renewalRes.data ?? []) as {
+          (renewalRes.data ?? []).filter((t) => activeIds.has(t.customer_id)) as {
             customer_id: string;
             customer_property_id: string | null;
             date: string;

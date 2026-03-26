@@ -137,12 +137,14 @@ export async function GET(request: Request) {
 
   const { data: fullData, error: fullError } = await serviceClient
     .from("customers")
-    .select(allColumns.join(", "));
+    .select(allColumns.join(", "))
+    .is("archived_at", null);
 
   if (fullError) {
     const { data: fallbackData, error: fallbackError } = await serviceClient
       .from("customers")
-      .select(baseColumns.join(", "));
+      .select(baseColumns.join(", "))
+      .is("archived_at", null);
     if (fallbackError) {
       const message =
         (fallbackError as PostgrestError).message ?? "Failed to load customers for report.";

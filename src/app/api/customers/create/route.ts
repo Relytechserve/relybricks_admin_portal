@@ -80,6 +80,7 @@ export async function POST(request: Request) {
     .from("customers")
     .select("id")
     .eq("email", email)
+    .is("archived_at", null)
     .maybeSingle();
 
   if (existingCustomer) {
