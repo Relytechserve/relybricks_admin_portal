@@ -503,7 +503,8 @@ function joinName(title: string, first: string, last: string): string {
   ): SubscriptionTierPrice | null {
     const r = resolveTierPriceForCity(tierPrices, tierId, city);
     if (!r) return null;
-    const { matchedCity: _matchedCity, ...rest } = r;
+    const { matchedCity, ...rest } = r;
+    void matchedCity;
     return rest as SubscriptionTierPrice;
   }
 
