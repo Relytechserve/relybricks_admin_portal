@@ -3,7 +3,9 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import { refreshCustomerNextRenewalFromProperties } from "@/lib/customer-renewal-mirror";
+import { upsertAutoPaidForRenewalYear } from "@/lib/property-renewal-paid-status";
 import { addOneYearToIsoDate } from "@/lib/renewal-date";
+import { subscriptionYearIndexForPayment } from "@/lib/subscription-year";
 import { recordAdminActivity } from "@/lib/record-admin-activity";
 
 type Payload = {
@@ -13,6 +15,8 @@ type Payload = {
   description?: string | null;
   /** When set, renewal updates this property's next_renewal_date and rolls up to customer. */
   customer_property_id?: string | null;
+  /** Optional override; default from property subscription_date + payment date. */
+  subscription_renewal_year?: number | null;
 };
 
 export async function POST(
@@ -156,10 +160,11 @@ export async function POST(
     }
   }
 
+  let propertySubscriptionDate: string | null = null;
   if (customerPropertyId) {
     const { data: propRow } = await serviceClient
       .from("customer_properties")
-      .select("id")
+      .select("id, subscription_date")
       .eq("id", customerPropertyId)
       .eq("customer_id", customerId)
       .maybeSingle();
@@ -169,9 +174,12 @@ export async function POST(
         { status: 400 },
       );
     }
+    propertySubscriptionDate = (propRow as { subscription_date?: string | null }).subscription_date ?? null;
   }
 
   let nextRenewalDate: string | null = null;
+  let subscriptionRenewalYear: number | null = null;
+
   if (type === "renewal") {
     nextRenewalDate = addOneYearToIsoDate(date);
     if (!nextRenewalDate) {
@@ -179,6 +187,36 @@ export async function POST(
         { error: "Invalid renewal date. Use YYYY-MM-DD." },
         { status: 400 },
       );
+    }
+    if (customerPropertyId) {
+      if (!propertySubscriptionDate) {
+        return NextResponse.json(
+          {
+            error:
+              "Set this property’s subscription start date before logging renewals (needed to assign subscription year).",
+          },
+          { status: 400 },
+        );
+      }
+      const rawYear = body?.subscription_renewal_year;
+      if (rawYear != null && String(rawYear).trim() !== "") {
+        const y = Number(rawYear);
+        if (!Number.isInteger(y) || y < 1) {
+          return NextResponse.json(
+            { error: "Subscription year must be a positive integer." },
+            { status: 400 },
+          );
+        }
+        subscriptionRenewalYear = y;
+      } else {
+        subscriptionRenewalYear = subscriptionYearIndexForPayment(propertySubscriptionDate, date);
+        if (subscriptionRenewalYear == null) {
+          return NextResponse.json(
+            { error: "Could not derive subscription year from dates." },
+            { status: 400 },
+          );
+        }
+      }
     }
   }
 
@@ -191,8 +229,9 @@ export async function POST(
       amount: amount != null && !Number.isNaN(amount) ? amount : null,
       description,
       date,
+      subscription_renewal_year: subscriptionRenewalYear,
     })
-    .select("id, type, amount, description, date, customer_property_id")
+    .select("id, type, amount, description, date, customer_property_id, subscription_renewal_year")
     .single();
 
   if (error) {
@@ -204,6 +243,9 @@ export async function POST(
   }
 
   if (type === "renewal" && nextRenewalDate) {
+    if (customerPropertyId && subscriptionRenewalYear != null) {
+      await upsertAutoPaidForRenewalYear(serviceClient, customerPropertyId, subscriptionRenewalYear);
+    }
     if (customerPropertyId) {
       const { error: propErr } = await serviceClient
         .from("customer_properties")

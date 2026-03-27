@@ -77,15 +77,31 @@ type SortKey =
   | "nextRenewal"
   | "payment";
 
- function getPaymentStatus(customer: CustomerRow): "paid" | "unpaid" {
+ /** No transactions → unpaid; otherwise paid only when billed amount &gt; 0. */
+ function getPaymentStatus(
+   customer: CustomerRow,
+   customerIdsWithTransactions: Set<string>,
+ ): "paid" | "unpaid" {
+   if (!customerIdsWithTransactions.has(customer.id)) return "unpaid";
    const billed = customer.billed_amount;
    return billed != null && Number(billed) > 0 ? "paid" : "unpaid";
+ }
+
+ function isCustomerInactive(customer: CustomerRow): boolean {
+   return (customer.status ?? "").trim().toLowerCase() === "inactive";
+ }
+
+ function isCustomerActive(customer: CustomerRow): boolean {
+   return (customer.status ?? "").trim().toLowerCase() === "active";
  }
 
  function CustomersPageContent() {
    const [customers, setCustomers] = useState<CustomerRow[]>([]);
    const [propertyRows, setPropertyRows] = useState<CustomerPropertyInsightRow[]>([]);
    const [maxRenewalByUnit, setMaxRenewalByUnit] = useState<Record<string, string>>({});
+   const [customerIdsWithTransactions, setCustomerIdsWithTransactions] = useState<Set<string>>(
+     () => new Set(),
+   );
    const [loading, setLoading] = useState(true);
    const [error, setError] = useState<string | null>(null);
    const [filters, setFilters] = useState<Filters>({
@@ -186,7 +202,7 @@ type SortKey =
       const activeIds = new Set(activeList.map((c) => c.id));
       setCustomers(activeList);
 
-      const [propRes, renewalRes] = await Promise.all([
+      const [propRes, renewalRes, txCustomersRes] = await Promise.all([
         supabase
           .from("customer_properties")
           .select("id, customer_id, subscription_date, next_renewal_date, package_revenue")
@@ -196,6 +212,7 @@ type SortKey =
           .select("customer_id, customer_property_id, date")
           .eq("type", "renewal")
           .limit(20000),
+        supabase.from("transactions").select("customer_id").limit(50000),
       ]);
       setPropertyRows(
         (propRes.data ?? []).filter((p) => activeIds.has(p.customer_id)) as CustomerPropertyInsightRow[],
@@ -209,6 +226,12 @@ type SortKey =
           }[],
         ),
       );
+      const txIds = new Set<string>();
+      for (const row of txCustomersRes.data ?? []) {
+        const id = (row as { customer_id?: string }).customer_id;
+        if (id) txIds.add(id);
+      }
+      setCustomerIdsWithTransactions(txIds);
 
       setLoading(false);
      }
@@ -299,7 +322,7 @@ type SortKey =
       }
 
        if (filters.paymentStatus !== "all") {
-         const status = getPaymentStatus(c);
+         const status = getPaymentStatus(c, customerIdsWithTransactions);
          if (filters.paymentStatus === "paid" && status !== "paid") return false;
          if (filters.paymentStatus === "unpaid" && status !== "unpaid") return false;
        }
@@ -373,8 +396,8 @@ type SortKey =
           break;
         }
         case "payment": {
-          const aPay = getPaymentStatus(a);
-          const bPay = getPaymentStatus(b);
+          const aPay = getPaymentStatus(a, customerIdsWithTransactions);
+          const bPay = getPaymentStatus(b, customerIdsWithTransactions);
           cmp = compareStrings(aPay, bPay);
           break;
         }
@@ -385,7 +408,15 @@ type SortKey =
     });
 
     return sorted;
-  }, [customers, billingUnits, filters, sort, renewalSegment, maxRenewalByUnit]);
+  }, [
+    customers,
+    billingUnits,
+    filters,
+    sort,
+    renewalSegment,
+    maxRenewalByUnit,
+    customerIdsWithTransactions,
+  ]);
 
   function handleSort(key: SortKey) {
     setSort((prev) =>
@@ -878,7 +909,10 @@ type SortKey =
              </thead>
              <tbody>
                {filteredCustomers.map((c) => {
-                 const paymentStatus = getPaymentStatus(c);
+                 const paymentStatus = getPaymentStatus(c, customerIdsWithTransactions);
+                 const inactiveRow = isCustomerInactive(c);
+                 const activeUnpaidRow =
+                   !inactiveRow && isCustomerActive(c) && paymentStatus === "unpaid";
                  const registrationDate =
                    c.subscription_date ??
                    c.created_at ??
@@ -889,7 +923,13 @@ type SortKey =
                  return (
                    <tr
                      key={c.id}
-                     className="border-b border-stone-100 hover:bg-stone-50 cursor-pointer"
+                     className={
+                       inactiveRow
+                         ? "border-b border-red-100 bg-red-50/90 hover:bg-red-50 cursor-pointer"
+                         : activeUnpaidRow
+                           ? "border-b border-amber-100 bg-amber-50/90 hover:bg-amber-50 cursor-pointer"
+                           : "border-b border-stone-100 hover:bg-stone-50 cursor-pointer"
+                     }
                      onClick={() =>
                        router.push(
                          `/dashboard/customers/${encodeURIComponent(c.id)}`,

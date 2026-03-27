@@ -13,6 +13,7 @@ export type AddTxSuccessPayload = {
     description: string | null;
     date: string;
     customer_property_id?: string | null;
+    subscription_renewal_year?: number | null;
   };
 };
 
@@ -37,6 +38,8 @@ export default function AddPropertyTransactionForm({
   const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
+  /** Optional override for subscription year (renewal + property only); blank = derive from dates. */
+  const [subscriptionRenewalYear, setSubscriptionRenewalYear] = useState("");
   const [saving, setSaving] = useState(false);
 
   async function handleSubmit() {
@@ -47,16 +50,26 @@ export default function AddPropertyTransactionForm({
     const num =
       amount.trim() === "" ? null : Number(amount.trim());
     try {
+      const yearRaw = subscriptionRenewalYear.trim();
+      const yearParsed =
+        type === "renewal" && customerPropertyId && yearRaw !== ""
+          ? Number(yearRaw)
+          : null;
+      const payload: Record<string, unknown> = {
+        type,
+        date,
+        amount: num != null && !Number.isNaN(num) ? num : null,
+        description: description.trim() || null,
+        customer_property_id: customerPropertyId,
+      };
+      if (type === "renewal" && customerPropertyId && yearParsed != null && !Number.isNaN(yearParsed)) {
+        payload.subscription_renewal_year = yearParsed;
+      }
+
       const res = await fetch(`/api/customers/${customerId}/transactions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type,
-          date,
-          amount: num != null && !Number.isNaN(num) ? num : null,
-          description: description.trim() || null,
-          customer_property_id: customerPropertyId,
-        }),
+        body: JSON.stringify(payload),
       });
       const result = (await res.json()) as AddTxSuccessPayload & { error?: string };
       if (!res.ok) {
@@ -67,6 +80,7 @@ export default function AddPropertyTransactionForm({
         onSuccess({ data: result.data, nextRenewalDate: result.nextRenewalDate });
         setAmount("");
         setDescription("");
+        setSubscriptionRenewalYear("");
         setDate(new Date().toISOString().slice(0, 10));
         setType("renewal");
       } else {
@@ -107,6 +121,25 @@ export default function AddPropertyTransactionForm({
           />
         </div>
       </div>
+      {type === "renewal" && customerPropertyId ? (
+        <div>
+          <label className="block text-[10px] text-stone-500">
+            Subscription year (optional)
+          </label>
+          <input
+            type="number"
+            min={1}
+            value={subscriptionRenewalYear}
+            onChange={(e) => setSubscriptionRenewalYear(e.target.value)}
+            placeholder="Auto from start date + payment date"
+            disabled={disabled}
+            className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1.5 text-xs disabled:opacity-50"
+          />
+          <p className="mt-0.5 text-[10px] text-stone-400">
+            Override if the customer paid early or late for this subscription year.
+          </p>
+        </div>
+      ) : null}
       <div className="grid gap-2 sm:grid-cols-2">
         <div>
           <label className="block text-[10px] text-stone-500">Amount (optional)</label>

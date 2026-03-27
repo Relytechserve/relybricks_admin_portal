@@ -13,6 +13,7 @@ import {
   todayYmdLocal,
   type BillingUnit,
 } from "@/lib/renewal-insights";
+import { subscriptionYearIndexForPayment } from "@/lib/subscription-year";
 import {
   BarChart,
   Bar,
@@ -85,6 +86,20 @@ type PropertyInsightRow = {
   package_revenue: number | null;
 };
 
+type RenewalTxnRow = {
+  customer_id: string;
+  customer_property_id: string | null;
+  amount: number | null;
+  date: string;
+  subscription_renewal_year: number | null;
+};
+
+type RenewalStatusRow = {
+  customer_property_id: string;
+  subscription_year: number;
+  is_paid: boolean;
+};
+
 const MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** Which calendar month receives this unit’s annual package: next renewal, else subscription start. */
@@ -116,6 +131,8 @@ export default function AdminDashboardPage() {
   const [customTo, setCustomTo] = useState("");
   const [selectedMonth, setSelectedMonth] = useState<MonthData | null>(null);
   const [propertyRows, setPropertyRows] = useState<PropertyInsightRow[]>([]);
+  const [renewalTxnRows, setRenewalTxnRows] = useState<RenewalTxnRow[]>([]);
+  const [renewalStatusRows, setRenewalStatusRows] = useState<RenewalStatusRow[]>([]);
   const [maxRenewalByUnit, setMaxRenewalByUnit] = useState<Record<string, string>>({});
   const [activityLog, setActivityLog] = useState<AdminActivityLogItem[]>([]);
   const router = useRouter();
@@ -156,8 +173,14 @@ export default function AdminDashboardPage() {
       setCustomers(list);
 
       const activeIds = new Set(list.map((c) => c.id).filter((id): id is string => Boolean(id)));
+      const inactiveCustomerIds = new Set(
+        list
+          .filter((c) => (c.status ?? "").trim().toLowerCase() === "inactive")
+          .map((c) => c.id)
+          .filter((id): id is string => Boolean(id)),
+      );
 
-      const [propRes, renewalRes] = await Promise.all([
+      const [propRes, renewalRes, renewalTxnRes, renewalStatusRes] = await Promise.all([
         supabase
           .from("customer_properties")
           .select("id, customer_id, subscription_date, next_renewal_date, package_revenue")
@@ -167,9 +190,30 @@ export default function AdminDashboardPage() {
           .select("customer_id, customer_property_id, date")
           .eq("type", "renewal")
           .limit(20000),
+        supabase
+          .from("transactions")
+          .select("customer_id, customer_property_id, amount, date, subscription_renewal_year")
+          .eq("type", "renewal")
+          .not("customer_property_id", "is", null)
+          .limit(20000),
+        supabase
+          .from("property_renewal_year_status")
+          .select("customer_property_id, subscription_year, is_paid")
+          .limit(50000),
       ]);
-      const propRows = (propRes.data ?? []).filter((p) => activeIds.has(p.customer_id));
+      const propRows = (propRes.data ?? []).filter(
+        (p) => activeIds.has(p.customer_id) && !inactiveCustomerIds.has(p.customer_id),
+      );
       setPropertyRows(propRows as PropertyInsightRow[]);
+      const propIdSetForRevenue = new Set(propRows.map((p) => p.id));
+      setRenewalTxnRows(
+        (renewalTxnRes.data ?? []).filter(
+          (t) => activeIds.has(t.customer_id) && !inactiveCustomerIds.has(t.customer_id),
+        ) as RenewalTxnRow[],
+      );
+      setRenewalStatusRows(
+        (renewalStatusRes.data ?? []).filter((r) => propIdSetForRevenue.has(r.customer_property_id)) as RenewalStatusRow[],
+      );
       setMaxRenewalByUnit(
         maxRenewalDateByCustomerProperty(
           (renewalRes.data ?? []).filter((t) => activeIds.has(t.customer_id)) as {
@@ -295,13 +339,35 @@ export default function AdminDashboardPage() {
 
     const todayYmd = todayYmdLocal();
 
-    const addToMonth = (
+    const statusPaidByPropYear = new Map<string, boolean>();
+    for (const r of renewalStatusRows) {
+      statusPaidByPropYear.set(`${r.customer_property_id}|${r.subscription_year}`, r.is_paid);
+    }
+    const txnYearKeys = new Set<string>();
+    for (const t of renewalTxnRows) {
+      if (t.customer_property_id && t.subscription_renewal_year != null) {
+        txnYearKeys.add(`${t.customer_property_id}|${t.subscription_renewal_year}`);
+      }
+    }
+
+    function isPaidEffective(propId: string, subscriptionYear: number): boolean {
+      const key = `${propId}|${subscriptionYear}`;
+      if (statusPaidByPropYear.has(key)) return statusPaidByPropYear.get(key)!;
+      return txnYearKeys.has(key);
+    }
+
+    const addAmountToMonth = (
       monthIndex1Based: number,
       u: BillingUnit,
       kind: "realized" | "scheduled",
+      amountOverride?: number,
     ) => {
-      if (!u.package_revenue || !u.customerId || !u.customerName) return;
-      const amount = u.package_revenue;
+      const amount =
+        amountOverride ??
+        (u.package_revenue != null && !Number.isNaN(Number(u.package_revenue))
+          ? Number(u.package_revenue)
+          : null);
+      if (!amount || amount <= 0 || !u.customerId || !u.customerName) return;
       const unitKey = `${u.customerId}|${u.propertyId ?? "legacy"}`;
       if (kind === "scheduled") {
         byMonthScheduled[monthIndex1Based] += amount;
@@ -317,13 +383,78 @@ export default function AdminDashboardPage() {
       });
     };
 
+    /** Legacy + customers without property subscription start date: anchor month. */
     billingUnits.forEach((u) => {
+      const cust = customers.find((c) => c.id === u.customerId);
+      if (cust && (cust.status ?? "").trim().toLowerCase() === "inactive") return;
+      if (u.propertyId) {
+        const pr = propertyRows.find((row) => row.id === u.propertyId);
+        if (pr?.subscription_date) return;
+      }
       const anchor = subscriptionAnchorYmd(u);
       if (!anchor) return;
       const d = new Date(`${anchor}T12:00:00`);
       if (!inRange(d)) return;
       const kind: "realized" | "scheduled" = anchor > todayYmd ? "scheduled" : "realized";
-      addToMonth(d.getMonth() + 1, u, kind);
+      addAmountToMonth(d.getMonth() + 1, u, kind);
+    });
+
+    /** Property-level: scheduled = expected package in the month of next renewal when that year is unpaid. */
+    propertyRows.forEach((p) => {
+      const subDate = p.subscription_date?.slice(0, 10);
+      const nextRe = p.next_renewal_date?.slice(0, 10);
+      if (!subDate || !nextRe) return;
+      const expected =
+        p.package_revenue != null && !Number.isNaN(Number(p.package_revenue))
+          ? Number(p.package_revenue)
+          : null;
+      if (expected == null || expected <= 0) return;
+      const cust = customers.find((c) => c.id === p.customer_id);
+      const name = (cust?.name ?? "").trim();
+      if (!name) return;
+      if ((cust?.status ?? "").trim().toLowerCase() === "inactive") return;
+      const subYear = subscriptionYearIndexForPayment(subDate, nextRe);
+      if (subYear == null) return;
+      if (isPaidEffective(p.id, subYear)) return;
+      const u: BillingUnit = {
+        customerId: p.customer_id,
+        customerName: name,
+        customerStatus: cust?.status ?? "",
+        propertyId: p.id,
+        subscription_date: p.subscription_date ?? null,
+        next_renewal_date: p.next_renewal_date ?? null,
+        package_revenue: expected,
+      };
+      const d = new Date(`${nextRe}T12:00:00`);
+      if (!inRange(d)) return;
+      addAmountToMonth(d.getMonth() + 1, u, "scheduled", expected);
+    });
+
+    /** Property-level: realized = actual renewal amounts in the payment month when paid for that year. */
+    renewalTxnRows.forEach((t) => {
+      if (!t.customer_property_id || t.subscription_renewal_year == null) return;
+      if (!isPaidEffective(t.customer_property_id, t.subscription_renewal_year)) return;
+      if (t.amount == null || Number.isNaN(Number(t.amount))) return;
+      const amt = Number(t.amount);
+      if (amt <= 0) return;
+      const p = propertyRows.find((row) => row.id === t.customer_property_id);
+      const cust = customers.find((c) => c.id === t.customer_id);
+      const name = (cust?.name ?? "").trim();
+      if (!p || !name) return;
+      if ((cust?.status ?? "").trim().toLowerCase() === "inactive") return;
+      const u: BillingUnit = {
+        customerId: t.customer_id,
+        customerName: name,
+        customerStatus: cust?.status ?? "",
+        propertyId: p.id,
+        subscription_date: p.subscription_date ?? null,
+        next_renewal_date: p.next_renewal_date ?? null,
+        package_revenue: amt,
+      };
+      const ymd = t.date.slice(0, 10);
+      const d = new Date(`${ymd}T12:00:00`);
+      if (!inRange(d)) return;
+      addAmountToMonth(d.getMonth() + 1, u, "realized", amt);
     });
 
     const chartData: MonthData[] = MONTH_LABELS.map((label, i) => {
@@ -353,7 +484,17 @@ export default function AdminDashboardPage() {
     };
 
     return { stats, chartData };
-  }, [customers, totalProperties, propertyRows, maxRenewalByUnit, datePreset, customFrom, customTo]);
+  }, [
+    customers,
+    totalProperties,
+    propertyRows,
+    renewalTxnRows,
+    renewalStatusRows,
+    maxRenewalByUnit,
+    datePreset,
+    customFrom,
+    customTo,
+  ]);
 
   if (loading) {
     return (
@@ -480,10 +621,14 @@ export default function AdminDashboardPage() {
         <div className="lg:col-span-2 bg-white rounded-xl border border-stone-200 p-4">
           <h2 className="text-base font-semibold text-stone-900">Subscription revenue</h2>
           <p className="text-sm text-stone-500 mt-0.5">
-            Annual package amount per billing unit in the month of its next renewal (or subscription start
-            if no renewal date). Each property rolls up separately; legacy customers without properties use
-            the customer row.             <span className="font-medium text-stone-600">Teal</span> is realized or due
-            today; <span className="font-medium text-stone-600">amber</span> is scheduled (future renewal).
+            Inactive customers are excluded. Per property with a subscription start date:{" "}
+            <span className="font-medium text-stone-700">scheduled</span> is the expected package amount in
+            the month of next renewal when that subscription year is not paid;{" "}
+            <span className="font-medium text-stone-700">realized</span> is the actual renewal transaction
+            amount in the month paid when that year is marked paid (including auto from renewal entries).
+            Legacy accounts without a property start date still use the old next-renewal anchor.{" "}
+            <span className="font-medium text-stone-600">Teal</span> is realized;{" "}
+            <span className="font-medium text-stone-600">amber</span> is scheduled.
             Bars are Jan–Dec; amounts only accrue in months inside the selected period —{" "}
             {datePreset === "week" && "last 7 days"}
             {datePreset === "month" && "this calendar month (full month)"}

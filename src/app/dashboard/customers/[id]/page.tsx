@@ -113,6 +113,14 @@ type CustomerTransaction = {
   date: string;
   last_edit_reason?: string | null;
   customer_property_id?: string | null;
+  subscription_renewal_year?: number | null;
+};
+
+type PropertyRenewalYearStatusRow = {
+  customer_property_id: string;
+  subscription_year: number;
+  is_paid: boolean;
+  paid_source: string;
 };
 
  function formatDate(value: string | null) {
@@ -219,8 +227,13 @@ function joinName(title: string, first: string, last: string): string {
   const [editTxAmount, setEditTxAmount] = useState("");
   const [editTxDescription, setEditTxDescription] = useState("");
   const [editTxReason, setEditTxReason] = useState("");
+  const [editTxRenewalYear, setEditTxRenewalYear] = useState("");
   const [savingEditTx, setSavingEditTx] = useState(false);
   const [editTxError, setEditTxError] = useState<string | null>(null);
+  const [renewalStatusByProperty, setRenewalStatusByProperty] = useState<
+    Record<string, PropertyRenewalYearStatusRow[]>
+  >({});
+  const [savingRenewalYearKey, setSavingRenewalYearKey] = useState<string | null>(null);
   const [showArchiveModal, setShowArchiveModal] = useState(false);
   const [archiveReasonInput, setArchiveReasonInput] = useState("");
   const [archiving, setArchiving] = useState(false);
@@ -345,7 +358,26 @@ function joinName(title: string, first: string, last: string): string {
             );
             setDocumentsByPropertyId(byProp);
           }
+
+          const { data: renewalRows } = await supabase
+            .from("property_renewal_year_status")
+            .select("customer_property_id, subscription_year, is_paid, paid_source")
+            .in("customer_property_id", propIds);
+          const grouped: Record<string, PropertyRenewalYearStatusRow[]> = {};
+          for (const r of renewalRows ?? []) {
+            const row = r as PropertyRenewalYearStatusRow;
+            if (!grouped[row.customer_property_id]) grouped[row.customer_property_id] = [];
+            grouped[row.customer_property_id].push(row);
+          }
+          for (const pid of propIds) {
+            (grouped[pid] ?? []).sort((a, b) => a.subscription_year - b.subscription_year);
+          }
+          setRenewalStatusByProperty(grouped);
+        } else {
+          setRenewalStatusByProperty({});
         }
+      } else {
+        setRenewalStatusByProperty({});
       }
 
       const { data: tiersData } = await supabase
@@ -379,7 +411,7 @@ function joinName(title: string, first: string, last: string): string {
       }
       const { data: transactionData, error: transactionLoadError } = await supabase
         .from("transactions")
-        .select("id, type, amount, description, date, last_edit_reason, customer_property_id")
+        .select("id, type, amount, description, date, last_edit_reason, customer_property_id, subscription_renewal_year")
         .eq("customer_id", id)
         .order("date", { ascending: false });
       if (transactionLoadError) {
@@ -451,6 +483,34 @@ function joinName(title: string, first: string, last: string): string {
     };
   }, [properties, form?.next_renewal_date, form?.package_revenue]);
 
+  async function refetchRenewalStatuses() {
+    if (!id) return;
+    const supabase = createClient();
+    const { data: propsData } = await supabase
+      .from("customer_properties")
+      .select("id")
+      .eq("customer_id", id);
+    const propIds = (propsData ?? []).map((p: { id: string }) => p.id);
+    if (propIds.length === 0) {
+      setRenewalStatusByProperty({});
+      return;
+    }
+    const { data: renewalRows } = await supabase
+      .from("property_renewal_year_status")
+      .select("customer_property_id, subscription_year, is_paid, paid_source")
+      .in("customer_property_id", propIds);
+    const grouped: Record<string, PropertyRenewalYearStatusRow[]> = {};
+    for (const r of renewalRows ?? []) {
+      const row = r as PropertyRenewalYearStatusRow;
+      if (!grouped[row.customer_property_id]) grouped[row.customer_property_id] = [];
+      grouped[row.customer_property_id].push(row);
+    }
+    for (const pid of propIds) {
+      (grouped[pid] ?? []).sort((a, b) => a.subscription_year - b.subscription_year);
+    }
+    setRenewalStatusByProperty(grouped);
+  }
+
   async function refetchAfterTransaction() {
     if (!id) return;
     const supabase = createClient();
@@ -481,6 +541,7 @@ function joinName(title: string, first: string, last: string): string {
       setForm((f) => (f ? { ...f, ...r } : f));
       setCustomer((c) => (c ? { ...c, ...r } : c));
     }
+    await refetchRenewalStatuses();
   }
 
   function mergeTransactionSuccess(
@@ -890,12 +951,14 @@ function joinName(title: string, first: string, last: string): string {
     setEditTxDate(tx.date);
     setEditTxAmount(tx.amount != null ? String(tx.amount) : "");
     setEditTxDescription(tx.description ?? "");
+    setEditTxRenewalYear(tx.subscription_renewal_year != null ? String(tx.subscription_renewal_year) : "");
     setEditTxReason("");
     setEditTxError(null);
   }
 
   function cancelEditTransaction() {
     setEditingTransactionId(null);
+    setEditTxRenewalYear("");
     setEditTxError(null);
   }
 
@@ -939,18 +1002,34 @@ function joinName(title: string, first: string, last: string): string {
         editTxAmount.trim() === ""
           ? null
           : Number(editTxAmount.trim());
+      const txBeingEdited = transactions.find((t) => t.id === editingTransactionId);
+      const hasProperty = Boolean(txBeingEdited?.customer_property_id);
+      const bodyPayload: Record<string, unknown> = {
+        type: editTxType,
+        date: editTxDate,
+        amount: amount != null && !Number.isNaN(amount) ? amount : null,
+        description: editTxDescription.trim() || null,
+        edit_reason: editTxReason.trim(),
+      };
+      if (editTxType === "renewal" && hasProperty) {
+        const trimmedY = editTxRenewalYear.trim();
+        if (trimmedY !== "") {
+          const y = Number(trimmedY);
+          if (!Number.isInteger(y) || y < 1) {
+            setEditTxError("Subscription year must be a positive integer.");
+            setSavingEditTx(false);
+            return;
+          }
+          bodyPayload.subscription_renewal_year = y;
+        }
+      }
+
       const res = await fetch(
         `/api/customers/${id}/transactions/${editingTransactionId}`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            type: editTxType,
-            date: editTxDate,
-            amount: amount != null && !Number.isNaN(amount) ? amount : null,
-            description: editTxDescription.trim() || null,
-            edit_reason: editTxReason.trim(),
-          }),
+          body: JSON.stringify(bodyPayload),
         },
       );
       const result = (await res.json()) as {
@@ -1800,6 +1879,21 @@ function joinName(title: string, first: string, last: string): string {
                                              />
                                            </div>
                                          </div>
+                                         {editTxType === "renewal" && tx.customer_property_id ? (
+                                           <div>
+                                             <label className="block text-[10px] text-stone-600">
+                                               Subscription year (optional)
+                                             </label>
+                                             <input
+                                               type="number"
+                                               min={1}
+                                               value={editTxRenewalYear}
+                                               onChange={(e) => setEditTxRenewalYear(e.target.value)}
+                                               placeholder="Auto from dates if empty"
+                                               className="mt-0.5 w-full rounded border border-stone-300 px-2 py-1 text-[11px]"
+                                             />
+                                           </div>
+                                         ) : null}
                                          <div>
                                            <label className="block text-[10px] text-stone-600">
                                              Reason <span className="text-red-600">*</span>
@@ -1845,6 +1939,11 @@ function joinName(title: string, first: string, last: string): string {
                                            <p className="text-[10px] text-stone-500">
                                              {new Date(tx.date).toLocaleDateString("en-IN")}
                                            </p>
+                                           {tx.type === "renewal" && tx.subscription_renewal_year != null ? (
+                                             <p className="text-[10px] text-stone-500">
+                                               Subscription year {tx.subscription_renewal_year}
+                                             </p>
+                                           ) : null}
                                            {tx.description && (
                                              <p className="text-[10px] text-stone-600">{tx.description}</p>
                                            )}
@@ -1874,6 +1973,127 @@ function joinName(title: string, first: string, last: string): string {
                                  .length === 0 && (
                                  <p className="text-[11px] text-stone-500">No entries for this property yet.</p>
                                )}
+                           </div>
+                           <div className="pt-3 border-t border-stone-200 space-y-2">
+                             <p className="text-[11px] font-medium text-stone-700">Subscription years (paid)</p>
+                             <p className="text-[10px] text-stone-500">
+                               Renewal transactions set this automatically. Toggle only if you need to correct a
+                               mistake. Paid requires a renewal entry for that year.
+                             </p>
+                             {(() => {
+                               const fromTx = transactions
+                                 .filter(
+                                   (tx) =>
+                                     tx.customer_property_id === prop.id &&
+                                     tx.type === "renewal" &&
+                                     tx.subscription_renewal_year != null,
+                                 )
+                                 .map((tx) => tx.subscription_renewal_year!);
+                               const fromStatus = (renewalStatusByProperty[prop.id] ?? []).map(
+                                 (r) => r.subscription_year,
+                               );
+                               const yearSet = new Set([...fromTx, ...fromStatus]);
+                               const years = Array.from(yearSet).sort((a, b) => a - b);
+                               if (years.length === 0) {
+                                 return (
+                                   <p className="text-[10px] text-stone-400">
+                                     No subscription years yet — log a renewal above (set property start date
+                                     first).
+                                   </p>
+                                 );
+                               }
+                               return (
+                                 <ul className="space-y-1.5">
+                                   {years.map((yr) => {
+                                     const row = (renewalStatusByProperty[prop.id] ?? []).find(
+                                       (r) => r.subscription_year === yr,
+                                     );
+                                     const hasTxn = transactions.some(
+                                       (tx) =>
+                                         tx.customer_property_id === prop.id &&
+                                         tx.type === "renewal" &&
+                                         tx.subscription_renewal_year === yr,
+                                     );
+                                     const paid = row ? row.is_paid : hasTxn;
+                                     const key = `${prop.id}-${yr}`;
+                                     return (
+                                       <li
+                                         key={yr}
+                                         className="flex flex-wrap items-center justify-between gap-2 rounded border border-stone-100 bg-stone-50/80 px-2 py-1.5"
+                                       >
+                                         <span className="text-[11px] text-stone-800">
+                                           Year {yr}
+                                           <span
+                                             className={`ml-2 font-medium ${
+                                               paid ? "text-emerald-700" : "text-amber-800"
+                                             }`}
+                                           >
+                                             {paid ? "Paid" : "Unpaid"}
+                                           </span>
+                                           {row?.paid_source === "admin_override" ? (
+                                             <span className="ml-1 text-[10px] text-stone-500">(admin)</span>
+                                           ) : null}
+                                         </span>
+                                         <div className="flex gap-1">
+                                           <button
+                                             type="button"
+                                             disabled={
+                                               isArchived ||
+                                               savingRenewalYearKey === key ||
+                                               (!paid && !hasTxn)
+                                             }
+                                             title={
+                                               !paid && !hasTxn
+                                                 ? "Add a renewal transaction for this year first"
+                                                 : undefined
+                                             }
+                                             onClick={() => {
+                                               if (!id || isArchived) return;
+                                               void (async () => {
+                                                 setSavingRenewalYearKey(key);
+                                                 try {
+                                                   const res = await fetch(
+                                                     `/api/customers/${id}/properties/${prop.id}/renewal-years/${yr}`,
+                                                     {
+                                                       method: "PATCH",
+                                                       headers: { "Content-Type": "application/json" },
+                                                       body: JSON.stringify({ is_paid: !paid }),
+                                                     },
+                                                   );
+                                                   const data = (await res.json()) as { error?: string };
+                                                   if (!res.ok) {
+                                                     setTransactionFeedback({
+                                                       ok: false,
+                                                       msg: data.error ?? "Could not update paid status.",
+                                                     });
+                                                     return;
+                                                   }
+                                                   await refetchRenewalStatuses();
+                                                   setTransactionFeedback({
+                                                     ok: true,
+                                                     msg: `Year ${yr} marked ${!paid ? "paid" : "unpaid"}.`,
+                                                   });
+                                                   setTimeout(() => setTransactionFeedback(null), 4000);
+                                                 } finally {
+                                                   setSavingRenewalYearKey(null);
+                                                 }
+                                               })();
+                                             }}
+                                             className="rounded border border-stone-300 bg-white px-2 py-0.5 text-[10px] text-stone-800 hover:bg-stone-50 disabled:opacity-40"
+                                           >
+                                             {savingRenewalYearKey === key
+                                               ? "…"
+                                               : paid
+                                                 ? "Mark unpaid"
+                                                 : "Mark paid"}
+                                           </button>
+                                         </div>
+                                       </li>
+                                     );
+                                   })}
+                                 </ul>
+                               );
+                             })()}
                            </div>
                          </div>
                        ) : tab === "documents" ? (

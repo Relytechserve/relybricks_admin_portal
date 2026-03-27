@@ -3,7 +3,12 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
 import { refreshCustomerNextRenewalFromProperties } from "@/lib/customer-renewal-mirror";
+import {
+  recomputeAutoStatusForPropertyYear,
+  upsertAutoPaidForRenewalYear,
+} from "@/lib/property-renewal-paid-status";
 import { addOneYearToIsoDate } from "@/lib/renewal-date";
+import { subscriptionYearIndexForPayment } from "@/lib/subscription-year";
 import { recordAdminActivity } from "@/lib/record-admin-activity";
 
 type Payload = {
@@ -12,6 +17,7 @@ type Payload = {
   amount?: number | string | null;
   description?: string | null;
   edit_reason: string;
+  subscription_renewal_year?: number | null;
 };
 
 export async function PATCH(
@@ -157,15 +163,36 @@ export async function PATCH(
 
   const { data: existingTx } = await serviceClient
     .from("transactions")
-    .select("customer_property_id")
+    .select("customer_property_id, type, subscription_renewal_year")
     .eq("id", txId)
     .eq("customer_id", customerId)
     .maybeSingle();
 
-  const propertyId = (existingTx as { customer_property_id?: string | null } | null)
-    ?.customer_property_id;
+  const existing = existingTx as {
+    customer_property_id?: string | null;
+    type?: string;
+    subscription_renewal_year?: number | null;
+  } | null;
+
+  const propertyId = existing?.customer_property_id ?? null;
+  const oldRenewalYear =
+    existing?.type === "renewal" ? existing?.subscription_renewal_year ?? null : null;
+
+  let propertySubscriptionDate: string | null = null;
+  if (propertyId) {
+    const { data: propRow } = await serviceClient
+      .from("customer_properties")
+      .select("subscription_date")
+      .eq("id", propertyId)
+      .eq("customer_id", customerId)
+      .maybeSingle();
+    propertySubscriptionDate = (propRow as { subscription_date?: string | null } | null)
+      ?.subscription_date ?? null;
+  }
 
   let nextRenewalDate: string | null = null;
+  let newSubscriptionRenewalYear: number | null = null;
+
   if (type === "renewal") {
     nextRenewalDate = addOneYearToIsoDate(date);
     if (!nextRenewalDate) {
@@ -173,6 +200,36 @@ export async function PATCH(
         { error: "Invalid renewal date. Use YYYY-MM-DD." },
         { status: 400 },
       );
+    }
+    if (propertyId) {
+      if (!propertySubscriptionDate) {
+        return NextResponse.json(
+          {
+            error:
+              "Set this property’s subscription start date before using renewal type (needed for subscription year).",
+          },
+          { status: 400 },
+        );
+      }
+      const rawYear = body?.subscription_renewal_year;
+      if (rawYear != null && String(rawYear).trim() !== "") {
+        const y = Number(rawYear);
+        if (!Number.isInteger(y) || y < 1) {
+          return NextResponse.json(
+            { error: "Subscription year must be a positive integer." },
+            { status: 400 },
+          );
+        }
+        newSubscriptionRenewalYear = y;
+      } else {
+        newSubscriptionRenewalYear = subscriptionYearIndexForPayment(propertySubscriptionDate, date);
+        if (newSubscriptionRenewalYear == null) {
+          return NextResponse.json(
+            { error: "Could not derive subscription year from dates." },
+            { status: 400 },
+          );
+        }
+      }
     }
   }
 
@@ -185,10 +242,13 @@ export async function PATCH(
       description,
       updated_at: new Date().toISOString(),
       last_edit_reason: editReason,
+      subscription_renewal_year: newSubscriptionRenewalYear,
     })
     .eq("id", txId)
     .eq("customer_id", customerId)
-    .select("id, type, amount, description, date, last_edit_reason, customer_property_id")
+    .select(
+      "id, type, amount, description, date, last_edit_reason, customer_property_id, subscription_renewal_year",
+    )
     .single();
 
   if (error) {
@@ -204,6 +264,19 @@ export async function PATCH(
       { error: "Transaction not found or access denied." },
       { status: 404 },
     );
+  }
+
+  if (propertyId && oldRenewalYear != null) {
+    const yearRemoved =
+      type !== "renewal" ||
+      newSubscriptionRenewalYear !== oldRenewalYear;
+    if (yearRemoved) {
+      await recomputeAutoStatusForPropertyYear(serviceClient, propertyId, oldRenewalYear);
+    }
+  }
+
+  if (type === "renewal" && propertyId && newSubscriptionRenewalYear != null) {
+    await upsertAutoPaidForRenewalYear(serviceClient, propertyId, newSubscriptionRenewalYear);
   }
 
   if (type === "renewal" && nextRenewalDate) {
