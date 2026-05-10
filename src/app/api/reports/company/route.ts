@@ -22,6 +22,7 @@ type CustomerRow = {
   package_revenue: number | null;
   billed_amount: number | null;
   outstanding_amount: number | null;
+  customer_location: string | null;
   property_city: string | null;
   property_area: string | null;
   property_type: string | null;
@@ -130,6 +131,7 @@ export async function GET(request: Request) {
     "lifecycle_stage",
     "payment_status",
     "updated_at",
+    "customer_location",
   ];
   const allColumns = [...baseColumns, ...optionalColumns];
 
@@ -150,7 +152,10 @@ export async function GET(request: Request) {
         (fallbackError as PostgrestError).message ?? "Failed to load customers for report.";
       return NextResponse.json({ error: message }, { status: 500 });
     }
-    customers = (fallbackData ?? []) as unknown as CustomerRow[];
+    customers = (fallbackData ?? []).map((row) => ({
+      ...(row as unknown as CustomerRow),
+      customer_location: null,
+    })) as CustomerRow[];
   } else {
     customers = (fullData ?? []) as unknown as CustomerRow[];
   }
@@ -189,8 +194,9 @@ export async function GET(request: Request) {
     { header: "Billed amount (₹)", key: "billed_amount", width: 18 },
     { header: "Outstanding amount (₹)", key: "outstanding_amount", width: 20 },
     { header: "Payment status", key: "payment_status", width: 16 },
-    { header: "Property city", key: "property_city", width: 18 },
-    { header: "Property area", key: "property_area", width: 18 },
+    { header: "Customer location", key: "customer_location", width: 22 },
+    { header: "Legacy property city", key: "property_city", width: 18 },
+    { header: "Legacy property area", key: "property_area", width: 18 },
     { header: "Property type", key: "property_type", width: 16 },
     { header: "Property status", key: "property_status", width: 16 },
     { header: "Created at", key: "created_at", width: 20 },
@@ -214,6 +220,7 @@ export async function GET(request: Request) {
       billed_amount: c.billed_amount ?? undefined,
       outstanding_amount: c.outstanding_amount ?? undefined,
       payment_status: c.payment_status,
+      customer_location: c.customer_location ?? null,
       property_city: c.property_city,
       property_area: c.property_area,
       property_type: c.property_type,

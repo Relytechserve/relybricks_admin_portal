@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 
 type Row = {
   id: string;
@@ -14,6 +15,8 @@ type Row = {
   deposit: number | null;
   balance: number | null;
   statementPeriod?: string | null;
+  invoiceNumber?: string;
+  invoiceStatus?: string;
 };
 
 type ScanPayload = {
@@ -45,6 +48,7 @@ function buildRequestBody(p: ScanPayload): Record<string, unknown> {
 }
 
 export default function FinancialReconciliationPage() {
+  const router = useRouter();
   const [form, setForm] = useState<ScanPayload>({
     dateFrom: "",
     dateTo: "",
@@ -69,6 +73,7 @@ export default function FinancialReconciliationPage() {
   const [sortBy, setSortBy] = useState<SortBy>("date");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [lastMode, setLastMode] = useState<"scan" | "search">("scan");
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   const hint = useMemo(
     () =>
@@ -117,6 +122,7 @@ export default function FinancialReconciliationPage() {
         return;
       }
       setRows(Array.isArray(data.rows) ? data.rows : []);
+      setSelectedIds([]);
       setFilesScanned(typeof data.filesScanned === "number" ? data.filesScanned : null);
       setTotalMatchedRows(typeof data.totalMatchedRows === "number" ? data.totalMatchedRows : null);
       setCurrentPage(typeof data.currentPage === "number" ? data.currentPage : targetPage);
@@ -197,6 +203,7 @@ export default function FinancialReconciliationPage() {
         return;
       }
       setRows(Array.isArray(data.rows) ? data.rows : []);
+      setSelectedIds([]);
       setTotalMatchedRows(typeof data.totalMatchedRows === "number" ? data.totalMatchedRows : null);
       setCurrentPage(typeof data.currentPage === "number" ? data.currentPage : targetPage);
       setPageSize(typeof data.pageSize === "number" ? data.pageSize : pageSize);
@@ -241,6 +248,18 @@ export default function FinancialReconciliationPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sortBy, sortDir]);
+
+  const allSelected = rows.length > 0 && rows.every((r) => selectedIds.includes(r.id));
+  const toggleRow = (id: string) => {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  };
+  const toggleAll = () => {
+    if (allSelected) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(rows.map((r) => r.id));
+    }
+  };
 
   return (
     <div className="max-w-6xl space-y-6">
@@ -393,6 +412,14 @@ export default function FinancialReconciliationPage() {
           >
             {exporting ? "Exporting…" : "Export Excel"}
           </button>
+          <button
+            type="button"
+            onClick={() => router.push(`/dashboard/invoices/new?tx=${encodeURIComponent(selectedIds.join(","))}`)}
+            disabled={selectedIds.length === 0}
+            className="inline-flex items-center rounded-lg border border-violet-300 bg-violet-50 px-4 py-2 text-xs font-semibold text-violet-700 hover:bg-violet-100 disabled:opacity-50"
+          >
+            Create Invoice ({selectedIds.length})
+          </button>
         </div>
 
         {error && (
@@ -453,7 +480,16 @@ export default function FinancialReconciliationPage() {
           <table className="min-w-full text-xs">
             <thead>
               <tr className="border-b border-stone-200 bg-stone-50 text-left text-stone-600">
+                <th className="px-3 py-2 font-medium">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    onChange={toggleAll}
+                    aria-label="Select all rows"
+                  />
+                </th>
                 <th className="px-3 py-2 font-medium">File</th>
+                <th className="px-3 py-2 font-medium">Invoice</th>
                 <th className="px-3 py-2 font-medium">Stmt period</th>
                 <th className="px-3 py-2 font-medium">Page</th>
                 <th className="px-3 py-2 font-medium">Line</th>
@@ -484,7 +520,24 @@ export default function FinancialReconciliationPage() {
             <tbody>
               {rows.map((r) => (
                 <tr key={r.id} className="border-b border-stone-100 align-top">
+                  <td className="px-3 py-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedIds.includes(r.id)}
+                      onChange={() => toggleRow(r.id)}
+                      aria-label={`Select transaction ${r.id}`}
+                    />
+                  </td>
                   <td className="px-3 py-2 font-mono text-stone-700 whitespace-nowrap">{r.relativePath}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">
+                    {r.invoiceNumber ? (
+                      <span className="rounded-full border border-violet-300 bg-violet-50 px-2 py-0.5 text-[11px] font-medium text-violet-700">
+                        {r.invoiceNumber} ({r.invoiceStatus ?? "draft"})
+                      </span>
+                    ) : (
+                      <span className="text-[11px] text-stone-400">Not invoiced</span>
+                    )}
+                  </td>
                   <td className="px-3 py-2 text-stone-600 text-[11px] max-w-[140px] truncate" title={r.statementPeriod ?? ""}>
                     {r.statementPeriod ?? "—"}
                   </td>

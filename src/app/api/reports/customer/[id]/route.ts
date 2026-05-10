@@ -18,6 +18,7 @@ type Customer = {
   billed_amount: number | null;
   outstanding_amount: number | null;
   payment_status: string | null;
+  customer_location: string | null;
   property_city: string | null;
   property_area: string | null;
   property_type: string | null;
@@ -121,6 +122,7 @@ export async function GET(
         "billed_amount",
         "outstanding_amount",
         "payment_status",
+        "customer_location",
         "property_city",
         "property_area",
         "property_type",
@@ -191,8 +193,9 @@ export async function GET(
       field: "Payment status",
       value: customer.payment_status,
     },
-    { field: "Property city", value: customer.property_city },
-    { field: "Property area", value: customer.property_area },
+    { field: "Customer location", value: customer.customer_location },
+    { field: "Legacy property city", value: customer.property_city },
+    { field: "Legacy property area", value: customer.property_area },
     { field: "Property type", value: customer.property_type },
     { field: "Property status", value: customer.property_status },
     { field: "Internal notes (legacy)", value: customer.notes },

@@ -216,12 +216,34 @@ export async function POST(request: Request) {
       statementPeriod: r.statement_period,
     }));
 
+    const txIds = rows.map((r) => Number(r.id)).filter((v) => Number.isFinite(v) && v > 0);
+    const invoiceByTxId = new Map<number, { invoiceNumber: string; invoiceStatus: string }>();
+    if (txIds.length > 0) {
+      const { data: links } = await serviceClient
+        .from("invoice_transaction_links")
+        .select("transaction_id, invoice:invoices(invoice_number, status)")
+        .in("transaction_id", txIds);
+      for (const link of links ?? []) {
+        const txId = Number((link as { transaction_id?: number }).transaction_id ?? 0);
+        const invoice = (link as { invoice?: { invoice_number?: string; status?: string } | null }).invoice;
+        if (!txId || !invoice?.invoice_number) continue;
+        invoiceByTxId.set(txId, {
+          invoiceNumber: String(invoice.invoice_number),
+          invoiceStatus: String(invoice.status ?? "draft"),
+        });
+      }
+    }
+    const rowsWithInvoice = rows.map((r) => ({
+      ...r,
+      ...(invoiceByTxId.get(Number(r.id)) ?? {}),
+    }));
+
     return NextResponse.json({
-      rows,
+      rows: rowsWithInvoice,
       filesScanned: extracted.filesScanned,
       errors: extracted.errors,
       persistedRows: payload.length,
-      totalMatchedRows: count ?? rows.length,
+      totalMatchedRows: count ?? rowsWithInvoice.length,
       currentPage: page,
       pageSize,
       sortBy: sort.sortBy,

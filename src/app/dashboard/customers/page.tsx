@@ -18,7 +18,6 @@ import { Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
    email: string;
    status: string;
    plan_type: string | null;
-  source: string | null;
   segment: string | null;
   lifecycle_stage: string | null;
   payment_status: string | null;
@@ -28,8 +27,7 @@ import { Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
    renewal_status: string | null;
    package_revenue: number | null;
    billed_amount: number | null;
-   property_city: string | null;
-   property_area: string | null;
+   customer_location: string | null;
    property_type: string | null;
    property_status: string | null;
    created_at: string | null;
@@ -50,8 +48,7 @@ import { Suspense, useEffect, useMemo, useState, type FormEvent } from "react";
    plan: string;
    paymentStatus: string;
   lifecycleStage: string;
-  source: string;
-   city: string;
+   customerLocation: string;
    registeredFrom: string;
    registeredTo: string;
    renewalFrom: string;
@@ -110,8 +107,7 @@ type SortKey =
      plan: "all",
      paymentStatus: "all",
     lifecycleStage: "all",
-    source: "all",
-     city: "all",
+     customerLocation: "all",
      registeredFrom: "",
      registeredTo: "",
      renewalFrom: "",
@@ -167,13 +163,17 @@ type SortKey =
         "renewal_status",
         "package_revenue",
         "billed_amount",
-        "property_city",
-        "property_area",
         "property_type",
         "property_status",
         "created_at",
       ];
-      const optionalColumns = ["source", "segment", "lifecycle_stage", "payment_status", "updated_at"];
+      const optionalColumns = [
+        "segment",
+        "lifecycle_stage",
+        "payment_status",
+        "updated_at",
+        "customer_location",
+      ];
       const allColumns = [...baseColumns, ...optionalColumns];
 
       let data: CustomerRow[] | null = null;
@@ -193,7 +193,10 @@ type SortKey =
           setLoading(false);
           return;
         }
-        data = (fallbackData ?? []) as unknown as CustomerRow[];
+        data = (fallbackData ?? []).map((row) => ({
+          ...(row as unknown as CustomerRow),
+          customer_location: null,
+        })) as CustomerRow[];
       } else {
         data = (fullData ?? []) as unknown as CustomerRow[];
       }
@@ -239,29 +242,17 @@ type SortKey =
      load();
    }, [router]);
 
-   const uniqueCities = useMemo(
+   const uniqueCustomerLocations = useMemo(
      () =>
        Array.from(
          new Set(
            customers
-             .map((c) => c.property_city)
+             .map((c) => c.customer_location)
              .filter((c): c is string => Boolean(c)),
          ),
        ).sort((a, b) => a.localeCompare(b)),
      [customers],
    );
-
-  const uniqueSources = useMemo(
-    () =>
-      Array.from(
-        new Set(
-          customers
-            .map((c) => c.source)
-            .filter((c): c is string => Boolean(c)),
-        ),
-      ).sort((a, b) => a.localeCompare(b)),
-    [customers],
-  );
 
   const billingUnits = useMemo(
     () => buildBillingUnits(customers, propertyRows),
@@ -317,17 +308,16 @@ type SortKey =
         return false;
       }
 
-      if (filters.source !== "all" && c.source !== filters.source) {
-        return false;
-      }
-
        if (filters.paymentStatus !== "all") {
          const status = getPaymentStatus(c, customerIdsWithTransactions);
          if (filters.paymentStatus === "paid" && status !== "paid") return false;
          if (filters.paymentStatus === "unpaid" && status !== "unpaid") return false;
        }
 
-       if (filters.city !== "all" && c.property_city !== filters.city) {
+       if (
+         filters.customerLocation !== "all" &&
+         c.customer_location !== filters.customerLocation
+       ) {
          return false;
        }
 
@@ -460,7 +450,6 @@ type SortKey =
         email: result.customer.email,
         status: result.customer.status,
         plan_type: null,
-        source: null,
         segment: null,
         lifecycle_stage: "active",
         payment_status: null,
@@ -470,8 +459,7 @@ type SortKey =
         renewal_status: null,
         package_revenue: null,
         billed_amount: null,
-        property_city: null,
-        property_area: null,
+        customer_location: null,
         property_type: null,
         property_status: null,
         created_at: new Date().toISOString(),
@@ -717,40 +705,24 @@ type SortKey =
                 <option value="churned">Churned</option>
               </select>
             </div>
-            <div>
-              <label className="block text-xs font-medium text-stone-600 mb-1">
-                Source
-              </label>
-              <select
-                value={filters.source}
-                onChange={(event) =>
-                  setFilters((prev) => ({ ...prev, source: event.target.value }))
-                }
-                className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              >
-                <option value="all">All</option>
-                {uniqueSources.map((source) => (
-                  <option key={source} value={source}>
-                    {source}
-                  </option>
-                ))}
-              </select>
-            </div>
              <div>
                <label className="block text-xs font-medium text-stone-600 mb-1">
-                 City
+                 Customer location
                </label>
                <select
-                 value={filters.city}
+                 value={filters.customerLocation}
                  onChange={(event) =>
-                   setFilters((prev) => ({ ...prev, city: event.target.value }))
+                   setFilters((prev) => ({
+                     ...prev,
+                     customerLocation: event.target.value,
+                   }))
                  }
                  className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
                >
                  <option value="all">All</option>
-                 {uniqueCities.map((city) => (
-                   <option key={city} value={city}>
-                     {city}
+                 {uniqueCustomerLocations.map((loc) => (
+                   <option key={loc} value={loc}>
+                     {loc}
                    </option>
                  ))}
                </select>
@@ -871,7 +843,7 @@ type SortKey =
                     onClick={() => handleSort("plan")}
                     className="inline-flex items-center"
                   >
-                    Plan / city
+                    Plan / location
                     {renderSortIndicator("plan")}
                   </button>
                 </th>
@@ -957,7 +929,7 @@ type SortKey =
                        <div className="flex flex-col gap-0.5">
                          <span>{c.plan_type ?? "—"}</span>
                          <span className="text-xs text-stone-500">
-                           {c.property_city ?? "City not set"}
+                           {c.customer_location ?? "Location not set"}
                          </span>
                        </div>
                      </td>

@@ -33,6 +33,8 @@
    billed_amount: number | null;
    outstanding_amount: number | null;
   contract_term_months: number | null;
+  /** Where the customer is based (e.g. country). */
+   customer_location: string | null;
    property_city: string | null;
    property_area: string | null;
    property_type: string | null;
@@ -286,6 +288,7 @@ function joinName(title: string, first: string, last: string): string {
              "billed_amount",
              "outstanding_amount",
              "contract_term_months",
+             "customer_location",
              "property_city",
              "property_area",
              "property_type",
@@ -619,8 +622,7 @@ function joinName(title: string, first: string, last: string): string {
          billed_amount: form.billed_amount,
          outstanding_amount: form.outstanding_amount,
          payment_status: form.payment_status,
-         property_city: form.property_city,
-         property_area: form.property_area,
+         customer_location: (form.customer_location ?? "").trim() || null,
          property_type: form.property_type,
          property_status: form.property_status,
          property_bhk: form.property_bhk,
@@ -1293,6 +1295,30 @@ function joinName(title: string, first: string, last: string): string {
                      <option value="Prospect">Prospect</option>
                    </select>
                  </div>
+               </div>
+               <div className="mt-4 border-t border-stone-100 pt-4">
+                 <p className="text-sm font-medium text-stone-900">
+                   Customer location
+                 </p>
+                 <p className="mt-1 text-xs text-stone-500">
+                   Where the customer is based (e.g. country). Indian property
+                   addresses are managed per property in{" "}
+                   <span className="font-medium text-stone-700">Properties hub</span>{" "}
+                   below.
+                 </p>
+                 <input
+                   type="text"
+                   placeholder="e.g. United Arab Emirates"
+                   value={form.customer_location ?? ""}
+                   onChange={(event) =>
+                     updateField(
+                       "customer_location",
+                       event.target.value.trim() || null,
+                     )
+                   }
+                   disabled={isArchived}
+                   className="mt-3 w-full rounded-lg border border-stone-300 px-3 py-2 text-sm text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+                 />
                </div>
                <div className="mt-4 grid gap-4 md:grid-cols-2">
                  <div>
