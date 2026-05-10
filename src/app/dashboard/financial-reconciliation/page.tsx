@@ -24,6 +24,8 @@ type ScanPayload = {
   amountEquals: string;
   amountMin: string;
   amountMax: string;
+  year: string;
+  month: string;
 };
 
 type SortBy = "date" | "withdrawal" | "deposit" | "balance";
@@ -37,6 +39,8 @@ function buildRequestBody(p: ScanPayload): Record<string, unknown> {
   if (p.amountEquals.trim()) body.amountEquals = Number.parseFloat(p.amountEquals);
   if (p.amountMin.trim()) body.amountMin = Number.parseFloat(p.amountMin);
   if (p.amountMax.trim()) body.amountMax = Number.parseFloat(p.amountMax);
+  if (p.year.trim()) body.year = Number.parseInt(p.year, 10);
+  if (p.month.trim()) body.month = Number.parseInt(p.month, 10);
   return body;
 }
 
@@ -49,6 +53,8 @@ export default function FinancialReconciliationPage() {
     amountEquals: "",
     amountMin: "",
     amountMax: "",
+    year: "",
+    month: "",
   });
   const [rows, setRows] = useState<Row[]>([]);
   const [filesScanned, setFilesScanned] = useState<number | null>(null);
@@ -259,6 +265,40 @@ export default function FinancialReconciliationPage() {
               className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-800 focus:outline-none focus:ring-2 focus:ring-violet-500"
               placeholder="Search text in particulars"
             />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-stone-700">Year</span>
+            <input
+              type="number"
+              min={2000}
+              max={2100}
+              value={form.year}
+              onChange={(e) => setForm((f) => ({ ...f, year: e.target.value }))}
+              className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-800 focus:outline-none focus:ring-2 focus:ring-violet-500"
+              placeholder="e.g. 2024"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs font-medium text-stone-700">Month</span>
+            <select
+              value={form.month}
+              onChange={(e) => setForm((f) => ({ ...f, month: e.target.value }))}
+              className="rounded-lg border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-800 focus:outline-none focus:ring-2 focus:ring-violet-500"
+            >
+              <option value="">All months</option>
+              <option value="1">Jan</option>
+              <option value="2">Feb</option>
+              <option value="3">Mar</option>
+              <option value="4">Apr</option>
+              <option value="5">May</option>
+              <option value="6">Jun</option>
+              <option value="7">Jul</option>
+              <option value="8">Aug</option>
+              <option value="9">Sep</option>
+              <option value="10">Oct</option>
+              <option value="11">Nov</option>
+              <option value="12">Dec</option>
+            </select>
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs font-medium text-stone-700">Date from</span>

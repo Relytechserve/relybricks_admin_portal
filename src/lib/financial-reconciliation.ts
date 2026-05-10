@@ -10,6 +10,8 @@ export type ReconciliationFilters = {
   amountEquals?: number;
   amountMin?: number;
   amountMax?: number;
+  year?: number;
+  month?: number;
 };
 
 export type ExtractedTransactionRow = {

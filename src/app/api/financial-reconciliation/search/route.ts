@@ -43,8 +43,11 @@ function parseFiltersFromBody(body: Record<string, unknown>): ReconciliationFilt
     amountEquals: parseNumber(body.amountEquals),
     amountMin: parseNumber(body.amountMin),
     amountMax: parseNumber(body.amountMax),
+    year: Number.isFinite(Number(body.year)) ? Number(body.year) : undefined,
+    month: Number.isFinite(Number(body.month)) ? Number(body.month) : undefined,
   };
 }
+
 
 export async function POST(request: Request) {
   const auth = await requireAdminSession();
@@ -111,6 +114,22 @@ export async function POST(request: Request) {
     if (filters.amountMax != null) {
       query = query.lte("transaction_amount", filters.amountMax);
       countQuery = countQuery.lte("transaction_amount", filters.amountMax);
+    }
+  }
+  if (filters.year && filters.year >= 1900 && filters.year <= 9999) {
+    const mm = filters.month && filters.month >= 1 && filters.month <= 12 ? filters.month : null;
+    if (mm) {
+      const from = `${filters.year}-${String(mm).padStart(2, "0")}-01`;
+      const nextYear = mm === 12 ? filters.year + 1 : filters.year;
+      const nextMonth = mm === 12 ? 1 : mm + 1;
+      const toExclusive = `${nextYear}-${String(nextMonth).padStart(2, "0")}-01`;
+      query = query.gte("tx_date", from).lt("tx_date", toExclusive);
+      countQuery = countQuery.gte("tx_date", from).lt("tx_date", toExclusive);
+    } else {
+      const yearFrom = `${filters.year}-01-01`;
+      const yearToExclusive = `${filters.year + 1}-01-01`;
+      query = query.gte("tx_date", yearFrom).lt("tx_date", yearToExclusive);
+      countQuery = countQuery.gte("tx_date", yearFrom).lt("tx_date", yearToExclusive);
     }
   }
 
