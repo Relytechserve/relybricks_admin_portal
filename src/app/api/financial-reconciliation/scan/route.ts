@@ -43,6 +43,15 @@ function parsePositiveInt(value: unknown, fallback: number): number {
  * Clears `financial_reconciliation_transactions` and dependent invoice links.
  * Prefers DB RPC (truncate + sequence reset); falls back to deletes if the migration is not applied yet.
  */
+function shouldUseTruncateFallback(rpcError: { code?: string; message?: string }): boolean {
+  const msg = rpcError.message ?? "";
+  if (rpcError.code === "PGRST202") return true;
+  if (/could not find the function|function .* does not exist|schema cache/i.test(msg)) return true;
+  // RPC defines `DELETE FROM …` without WHERE; Supabase/safe-update often rejects it before REST fallback ran.
+  if (/DELETE requires|UPDATE requires|WHERE clause/i.test(msg)) return true;
+  return false;
+}
+
 async function resetFinancialReconciliationData(
   client: SupabaseClient,
 ): Promise<{ ok: true } | { ok: false; message: string }> {
@@ -50,10 +59,7 @@ async function resetFinancialReconciliationData(
   if (!rpcError) return { ok: true };
 
   const msg = rpcError.message ?? String(rpcError);
-  const fnMissing =
-    rpcError.code === "PGRST202" ||
-    /could not find the function|function .* does not exist|schema cache/i.test(msg);
-  if (!fnMissing) return { ok: false, message: msg };
+  if (!shouldUseTruncateFallback(rpcError)) return { ok: false, message: msg };
 
   // PostgREST rejects unqualified DELETE calls; anchor each delete on bigint PK (service role bypasses RLS).
   const { error: delLinks } = await client.from("invoice_transaction_links").delete().gte("id", 1);
