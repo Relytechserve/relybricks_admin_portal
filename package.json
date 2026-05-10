@@ -6,13 +6,15 @@
     "dev": "next dev -p 3003",
     "build": "next build",
     "start": "next start -p 3003",
-    "lint": "next lint"
+    "lint": "next lint",
+    "import-customer-location": "node scripts/import-customer-location.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.9.0",
     "@supabase/supabase-js": "^2.98.0",
     "exceljs": "^4.4.0",
     "next": "14.2.35",
+    "pdf-parse": "^2.4.5",
     "react": "^18",
     "react-dom": "^18",
     "recharts": "^3.7.0"

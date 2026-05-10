@@ -39,6 +39,12 @@ function SidebarIcon({ name }: { name: string }) {
           <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
         </svg>
       );
+    case "reconciliation":
+      return (
+        <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -56,6 +62,7 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
     pathname === "/dashboard/customers" ||
     pathname?.startsWith("/dashboard/customers/");
   const isReports = pathname === "/dashboard/reports";
+  const isReconciliation = pathname === "/dashboard/financial-reconciliation";
 
   useEffect(() => {
     const supabase = createClient();
@@ -79,6 +86,12 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
     { href: "/dashboard", label: "Insight", icon: "insight", active: isDashboard },
     { href: "/dashboard/customers", label: "Customers", icon: "customers", active: isCustomers },
     { href: "/dashboard/reports", label: "Reports", icon: "properties", active: isReports },
+    {
+      href: "/dashboard/financial-reconciliation",
+      label: "Reconciliation",
+      icon: "reconciliation",
+      active: isReconciliation,
+    },
     { href: "/dashboard/subscription", label: "Subscription", icon: "subscription", active: pathname?.startsWith("/dashboard/subscription") ?? false },
   ] as const;
 
@@ -230,6 +243,16 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
                 }
               >
                 Reports
+              </Link>
+              <Link
+                href="/dashboard/financial-reconciliation"
+                className={
+                  isReconciliation
+                    ? "text-violet-700"
+                    : "hover:text-stone-900"
+                }
+              >
+                Reconciliation
               </Link>
             </nav>
           </div>
