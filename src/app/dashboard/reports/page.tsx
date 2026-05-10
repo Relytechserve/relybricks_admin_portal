@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Bar,
   BarChart,
@@ -96,6 +97,23 @@ type LargeWithdrawalRow = {
   source_file: string;
 };
 
+type DepositCustomerMatchRow = {
+  id: number;
+  tx_date: string;
+  deposit: number;
+  particulars: string;
+  source_file: string;
+  matchedCustomerId: string | null;
+  matchedCustomerName: string | null;
+  matchKind: string;
+  manualCustomerId: string | null;
+  suggestedCustomerId: string | null;
+  suggestedCustomerName: string | null;
+  suggestedMatchKind: string;
+};
+
+type CustomerPickRow = { id: string; name: string; email: string };
+
 export default function ReportsPage() {
   const [datePreset, setDatePreset] = useState<DatePreset>("year");
   const [customFrom, setCustomFrom] = useState("");
@@ -120,6 +138,129 @@ export default function ReportsPage() {
   const [largeWdRows, setLargeWdRows] = useState<LargeWithdrawalRow[]>([]);
   const [largeWdTotalMatching, setLargeWdTotalMatching] = useState<number | null>(null);
   const [largeWdMinAmount, setLargeWdMinAmount] = useState("10000");
+
+  const [depCustLoading, setDepCustLoading] = useState(false);
+  const [depCustError, setDepCustError] = useState<string | null>(null);
+  const [depCustRows, setDepCustRows] = useState<DepositCustomerMatchRow[]>([]);
+  const [depCustCustomerCount, setDepCustCustomerCount] = useState<number | null>(null);
+  const [depCustLimit, setDepCustLimit] = useState("200");
+  const [depCustFrom, setDepCustFrom] = useState("");
+  const [depCustTo, setDepCustTo] = useState("");
+  const [depCustMatchFilter, setDepCustMatchFilter] = useState<"all" | "matched" | "unknown">("all");
+  const [depCustPicklist, setDepCustPicklist] = useState<CustomerPickRow[]>([]);
+  const [assignmentDraftByTx, setAssignmentDraftByTx] = useState<Record<number, string>>({});
+  const [depCustSavingId, setDepCustSavingId] = useState<number | null>(null);
+
+  useEffect(() => {
+    async function loadPicklist() {
+      try {
+        const res = await fetch("/api/customers/options", { cache: "no-store" });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) return;
+        const list = Array.isArray(json.customers) ? json.customers : [];
+        setDepCustPicklist(
+          list.map((x: Record<string, unknown>) => ({
+            id: String(x.id ?? ""),
+            name: String(x.name ?? ""),
+            email: String(x.email ?? ""),
+          })),
+        );
+      } catch {
+        /* silent */
+      }
+    }
+    void loadPicklist();
+  }, []);
+
+  useEffect(() => {
+    setAssignmentDraftByTx((prev) => {
+      const ids = new Set(depCustRows.map((r) => r.id));
+      const next = { ...prev };
+      for (const r of depCustRows) {
+        if (next[r.id] === undefined) next[r.id] = r.manualCustomerId ?? "";
+      }
+      for (const k of Object.keys(next)) {
+        const nid = Number(k);
+        if (!ids.has(nid)) delete next[nid];
+      }
+      return next;
+    });
+  }, [depCustRows]);
+
+  const depCustFilteredRows = useMemo(() => {
+    if (depCustMatchFilter === "all") return depCustRows;
+    const isMatched = (r: DepositCustomerMatchRow) => Boolean(r.matchedCustomerId && r.matchedCustomerName);
+    if (depCustMatchFilter === "matched") return depCustRows.filter(isMatched);
+    return depCustRows.filter((r) => !isMatched(r));
+  }, [depCustRows, depCustMatchFilter]);
+
+  const loadDepositCustomerMatches = useCallback(async () => {
+    setDepCustLoading(true);
+    setDepCustError(null);
+    try {
+      const params = new URLSearchParams();
+      const lim = Number.parseInt(depCustLimit.trim(), 10);
+      params.set("limit", Number.isFinite(lim) && lim > 0 ? String(Math.min(500, lim)) : "200");
+      if (depCustFrom.trim()) params.set("from", depCustFrom.trim());
+      if (depCustTo.trim()) params.set("to", depCustTo.trim());
+      const res = await fetch(`/api/reports/deposit-customer-matches?${params.toString()}`, { cache: "no-store" });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(typeof json.error === "string" ? json.error : `Request failed (${res.status})`);
+
+      const rowsRaw = Array.isArray(json.rows) ? json.rows : [];
+      setDepCustRows(
+        rowsRaw.map((x: Record<string, unknown>) => ({
+          id: Number(x.id ?? 0),
+          tx_date: String(x.tx_date ?? ""),
+          deposit: Number(x.deposit ?? 0),
+          particulars: String(x.particulars ?? ""),
+          source_file: String(x.source_file ?? ""),
+          matchedCustomerId: typeof x.matchedCustomerId === "string" ? x.matchedCustomerId : null,
+          matchedCustomerName: typeof x.matchedCustomerName === "string" ? x.matchedCustomerName : null,
+          matchKind: String(x.matchKind ?? "unknown"),
+          manualCustomerId: typeof x.manualCustomerId === "string" ? x.manualCustomerId : null,
+          suggestedCustomerId: typeof x.suggestedCustomerId === "string" ? x.suggestedCustomerId : null,
+          suggestedCustomerName: typeof x.suggestedCustomerName === "string" ? x.suggestedCustomerName : null,
+          suggestedMatchKind: String(x.suggestedMatchKind ?? "unknown"),
+        })),
+      );
+      setDepCustCustomerCount(typeof json.customerCount === "number" ? json.customerCount : null);
+    } catch (e) {
+      setDepCustError(e instanceof Error ? e.message : "Could not load deposit matches.");
+      setDepCustRows([]);
+      setDepCustCustomerCount(null);
+    } finally {
+      setDepCustLoading(false);
+    }
+  }, [depCustLimit, depCustFrom, depCustTo]);
+
+  useEffect(() => {
+    void loadDepositCustomerMatches();
+  }, [loadDepositCustomerMatches]);
+
+  const saveDepositCustomerAssignment = useCallback(
+    async (transactionId: number) => {
+      const raw = assignmentDraftByTx[transactionId] ?? "";
+      const customerId = raw.trim() === "" ? null : raw.trim();
+      setDepCustSavingId(transactionId);
+      setDepCustError(null);
+      try {
+        const res = await fetch("/api/financial-reconciliation/transaction-customer", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transactionId, customerId }),
+        });
+        const json = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(typeof json.error === "string" ? json.error : `Save failed (${res.status})`);
+        await loadDepositCustomerMatches();
+      } catch (e) {
+        setDepCustError(e instanceof Error ? e.message : "Could not save assignment.");
+      } finally {
+        setDepCustSavingId(null);
+      }
+    },
+    [assignmentDraftByTx, loadDepositCustomerMatches],
+  );
 
   const loadWithdrawalAnalytics = useCallback(async () => {
     setTopWdLoading(true);
@@ -516,6 +657,207 @@ export default function ReportsPage() {
 
         {bankPl && bankPl.monthly.length === 0 && !bankPlLoading && (
           <p className="text-xs text-stone-500">No bank transactions in the selected range.</p>
+        )}
+      </section>
+
+      <section className="bg-white rounded-xl border border-stone-200 p-4 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-3">
+          <div className="max-w-2xl space-y-1">
+            <h2 className="text-base font-semibold text-stone-900">Incoming deposits — customer name matching</h2>
+            <p className="text-xs text-stone-600">
+              Each row is a <span className="font-medium text-stone-800">deposit</span> line from reconciliation (
+              <code className="text-[11px]">flow = deposit</code>, amount in{" "}
+              <code className="text-[11px]">deposit</code>). We suggest a customer by matching active customer{" "}
+              <span className="font-medium">name</span> tokens to <span className="font-medium">particulars</span>. Use the
+              assign column to <span className="font-medium">override</span> (saved on the transaction); clearing the
+              assignment returns to the automatic suggestion. Unmatched lines show{" "}
+              <span className="font-medium text-stone-800">unknown</span>.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadDepositCustomerMatches()}
+            disabled={depCustLoading}
+            className="shrink-0 rounded-lg border border-stone-300 bg-white px-3 py-2 text-xs font-semibold text-stone-800 hover:bg-stone-50 disabled:opacity-60"
+          >
+            {depCustLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+
+        <div className="flex flex-wrap items-end gap-3 text-xs">
+          <label className="flex flex-col gap-1">
+            <span className="font-medium text-stone-700">Row limit</span>
+            <input
+              type="number"
+              min={1}
+              max={500}
+              value={depCustLimit}
+              onChange={(e) => setDepCustLimit(e.target.value)}
+              className="w-24 rounded border border-stone-300 px-2 py-1"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="font-medium text-stone-700">From (optional)</span>
+            <input
+              type="date"
+              value={depCustFrom}
+              onChange={(e) => setDepCustFrom(e.target.value)}
+              className="rounded border border-stone-300 px-2 py-1"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="font-medium text-stone-700">To (optional)</span>
+            <input
+              type="date"
+              value={depCustTo}
+              onChange={(e) => setDepCustTo(e.target.value)}
+              className="rounded border border-stone-300 px-2 py-1"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="font-medium text-stone-700">Match</span>
+            <select
+              value={depCustMatchFilter}
+              onChange={(e) => setDepCustMatchFilter(e.target.value as "all" | "matched" | "unknown")}
+              className="rounded border border-stone-300 bg-white px-2 py-1 min-w-[10rem]"
+            >
+              <option value="all">All deposits</option>
+              <option value="matched">Matched only</option>
+              <option value="unknown">Unknown only</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => void loadDepositCustomerMatches()}
+            disabled={depCustLoading}
+            className="rounded-lg bg-stone-900 px-4 py-2 text-xs font-semibold text-white hover:bg-stone-800 disabled:opacity-60"
+          >
+            Apply
+          </button>
+        </div>
+
+        {depCustCustomerCount != null && (
+          <p className="text-[11px] text-stone-500">
+            Active customers loaded for matching: <span className="font-medium text-stone-800">{depCustCustomerCount}</span>
+          </p>
+        )}
+
+        {depCustError && <p className="text-sm text-red-600">{depCustError}</p>}
+
+        {depCustLoading && depCustRows.length === 0 ? (
+          <p className="text-xs text-stone-600">Loading deposit rows…</p>
+        ) : depCustRows.length > 0 && depCustFilteredRows.length === 0 ? (
+          <p className="text-xs text-stone-500">
+            No rows match the selected filter (&quot;
+            {depCustMatchFilter === "matched" ? "Matched only" : "Unknown only"}&quot;). Try &quot;All deposits&quot;
+            or load more rows.
+          </p>
+        ) : depCustRows.length > 0 ? (
+          <>
+            {depCustMatchFilter !== "all" && (
+              <p className="text-[11px] text-stone-600">
+                Showing <span className="font-medium text-stone-800">{depCustFilteredRows.length}</span> of{" "}
+                <span className="font-medium text-stone-800">{depCustRows.length}</span> loaded rows.
+              </p>
+            )}
+            <div className="overflow-auto rounded-lg border border-stone-200">
+            <table className="min-w-full text-xs">
+              <thead>
+                <tr className="border-b border-stone-200 bg-stone-50 text-left text-stone-600">
+                  <th className="px-3 py-2 whitespace-nowrap">Date</th>
+                  <th className="px-3 py-2 whitespace-nowrap">Deposit (₹)</th>
+                  <th className="px-3 py-2">Matched customer</th>
+                  <th className="px-3 py-2 whitespace-nowrap">Match</th>
+                  <th className="px-3 py-2">Particulars</th>
+                  <th className="px-3 py-2">Source file</th>
+                  <th className="px-3 py-2 min-w-[12rem]">Assign customer</th>
+                </tr>
+              </thead>
+              <tbody>
+                {depCustFilteredRows.map((r) => {
+                  const hasMatch = Boolean(r.matchedCustomerId && r.matchedCustomerName);
+                  const displayName =
+                    hasMatch && r.matchedCustomerName ? r.matchedCustomerName : "unknown";
+                  const selectValue = assignmentDraftByTx[r.id] ?? r.manualCustomerId ?? "";
+                  const suggestedLine =
+                    r.suggestedCustomerName && r.suggestedMatchKind !== "unknown"
+                      ? `${r.suggestedCustomerName} (${r.suggestedMatchKind})`
+                      : r.suggestedMatchKind === "unknown"
+                        ? "unknown"
+                        : r.suggestedCustomerName ?? "—";
+                  return (
+                    <tr key={r.id} className="border-b border-stone-100 align-top">
+                      <td className="px-3 py-2 whitespace-nowrap text-stone-700">{r.tx_date}</td>
+                      <td className="px-3 py-2 whitespace-nowrap font-medium text-stone-900">{r.deposit.toFixed(2)}</td>
+                      <td className="px-3 py-2 text-stone-800">
+                        {hasMatch && r.matchedCustomerId ? (
+                          <Link
+                            href={`/dashboard/customers/${r.matchedCustomerId}`}
+                            className="font-medium text-violet-700 hover:underline"
+                          >
+                            {displayName}
+                          </Link>
+                        ) : (
+                          <span className="text-stone-500 italic">unknown</span>
+                        )}
+                        {r.manualCustomerId && (
+                          <span className="mt-1 block text-[10px] font-medium text-amber-800">Manual override</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-2 text-stone-600">
+                        <span>{r.matchKind === "unknown" ? "unknown" : r.matchKind}</span>
+                        {r.manualCustomerId ? (
+                          <span className="mt-1 block text-[10px] text-stone-500">
+                            Auto guess: {suggestedLine}
+                          </span>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2 text-stone-800 max-w-xl">{r.particulars}</td>
+                      <td className="px-3 py-2 font-mono text-stone-600 text-[11px]">{r.source_file}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <div className="flex flex-col gap-1 min-w-[11rem]">
+                          <select
+                            className="w-full rounded border border-stone-300 bg-white px-2 py-1 text-[11px] text-stone-800 max-w-[14rem]"
+                            value={selectValue}
+                            disabled={depCustSavingId !== null || depCustPicklist.length === 0}
+                            onChange={(e) =>
+                              setAssignmentDraftByTx((prev) => ({ ...prev, [r.id]: e.target.value }))
+                            }
+                          >
+                            <option value="">— Clear (use suggestion) —</option>
+                            {depCustPicklist.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                                {c.email ? ` · ${c.email}` : ""}
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            disabled={
+                              depCustSavingId !== null ||
+                              selectValue.trim() === (r.manualCustomerId ?? "").trim()
+                            }
+                            onClick={() => void saveDepositCustomerAssignment(r.id)}
+                            className="rounded border border-violet-300 bg-violet-50 px-2 py-0.5 text-[11px] font-semibold text-violet-800 hover:bg-violet-100 disabled:opacity-50"
+                          >
+                            {depCustSavingId === r.id ? "Saving…" : "Save"}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          </>
+        ) : (
+          !depCustLoading && (
+            <p className="text-xs text-stone-500">
+              No incoming deposit rows in range, or reconciliation has not been scanned yet.
+            </p>
+          )
         )}
       </section>
 

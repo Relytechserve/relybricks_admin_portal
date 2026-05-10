@@ -167,9 +167,29 @@ export async function POST(request: Request) {
     });
 
     if (payload.length > 0) {
+      const fingerprintList = Array.from(new Set(payload.map((p) => p.fingerprint)));
+      const { data: existingRows, error: existingErr } = await serviceClient
+        .from(TABLE)
+        .select("fingerprint, customer_id")
+        .in("fingerprint", fingerprintList);
+      if (existingErr) {
+        return NextResponse.json({ error: existingErr.message }, { status: 500 });
+      }
+      const preservedCustomerByFp = new Map<string, string>();
+      for (const row of existingRows ?? []) {
+        const fp = String((row as { fingerprint?: string }).fingerprint ?? "");
+        const cid = (row as { customer_id?: string | null }).customer_id;
+        if (fp && typeof cid === "string" && cid.length > 0) preservedCustomerByFp.set(fp, cid);
+      }
+      /** Keep manual/report customer mapping across re-ingest when the fingerprint is unchanged */
+      const payloadWithPreserved = payload.map((p) => {
+        const cid = preservedCustomerByFp.get(p.fingerprint);
+        return cid ? { ...p, customer_id: cid } : p;
+      });
+
       const { error: upsertError } = await serviceClient
         .from(TABLE)
-        .upsert(payload, { onConflict: "fingerprint" });
+        .upsert(payloadWithPreserved, { onConflict: "fingerprint" });
       if (upsertError) {
         return NextResponse.json({ error: upsertError.message }, { status: 500 });
       }

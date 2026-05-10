@@ -133,6 +133,16 @@ function money(n: number | null | undefined): number {
  * Fix wrong Withdrawal/Deposit when the PDF line order does not match [debit, credit, balance].
  * If balance increased vs the previous row, the txn amount must be a credit (deposit); if it decreased, a debit.
  */
+function amountTolForBalanceCheck(movementApprox: number): number {
+  const base = 1.5;
+  /** Large statements: loosen absolute tolerance slightly so ₹40k deltas are not swallowed by rounding noise */
+  const scale = Math.min(50, movementApprox * 0.00025);
+  return base + scale;
+}
+
+/**
+ * Ledger rule: Δbalance ≈ deposits − withdrawals (for one movement per row, prior balance trustworthy).
+ */
 function refineAmountsByBalanceDelta(
   previousBalance: number | null,
   assigned: { withdrawal: number | null; deposit: number | null; balance: number | null },
@@ -143,24 +153,24 @@ function refineAmountsByBalanceDelta(
   }
 
   const delta = Math.round((money(bal) - money(previousBalance)) * 100) / 100;
-  const tol = 1.5;
   const wv = money(assigned.withdrawal);
   const dv = money(assigned.deposit);
+  const tol = amountTolForBalanceCheck(Math.abs(delta));
 
   if (Math.abs(delta) < tol) return assigned;
 
-  // Balance went up → credit should carry the amount
+  // Balance went up → net credit: lone withdrawal amount is misplaced
   if (delta > tol) {
     if (wv > tol && dv < tol) {
-      return { withdrawal: null, deposit: wv, balance: bal };
+      return { withdrawal: null, deposit: Math.round(wv * 100) / 100, balance: bal };
     }
     return assigned;
   }
 
-  // Balance went down → debit should carry the amount
+  // Balance went down → net debit: lone deposit amount should be withdrawal
   if (delta < -tol) {
     if (dv > tol && wv < tol) {
-      return { withdrawal: dv, deposit: null, balance: bal };
+      return { withdrawal: Math.round(dv * 100) / 100, deposit: null, balance: bal };
     }
     return assigned;
   }
@@ -169,11 +179,43 @@ function refineAmountsByBalanceDelta(
 }
 
 /**
+ * When only one leg is filled before balance delta and narration is ambiguous, choose debit vs credit from Δbalance.
+ */
+function inferSingleMovementFromBalances(
+  previousBalance: number | null,
+  amount: number,
+  balanceAfter: number | null,
+): { withdrawal: number | null; deposit: number | null } | null {
+  if (previousBalance == null || balanceAfter == null || amount <= 0) return null;
+  const delta = Math.round((money(balanceAfter) - money(previousBalance)) * 100) / 100;
+  const tol = amountTolForBalanceCheck(amount);
+  if (Math.abs(delta) < tol) return null;
+  const need = Math.abs(delta);
+  /** Movement must reconcile to the lone amount on the row (rounding / minor fee tolerance) */
+  if (Math.abs(need - amount) > tol + 12) return null;
+  if (delta > tol) return { withdrawal: null, deposit: Math.round(amount * 100) / 100 };
+  return { withdrawal: Math.round(amount * 100) / 100, deposit: null };
+}
+
+/**
  * When we have no prior balance or weak delta, reduce false debits/credits from particulars.
  * (Does not override balance-delta when that already swapped columns.)
  */
+function inferStrongOutboundTransfer(particulars: string): boolean {
+  const l = particulars.toLowerCase();
+  if (/\bcustomer induced\b/.test(l)) return true;
+  if (/\bpsp\s*payments?\b|\bimps\s*merchant\b|\bmerchant\s*paid\b/i.test(particulars)) return false;
+  /** P2A in Indian statements is usually payment-to-account outbound from the account holder when paired with IMPS/UPI */
+  if (/\bp2a\b/.test(l) && /\b(imps|upi)\b/.test(l)) return true;
+  /** Outbound IMPS phrasing */
+  if (/\boutward\b.*\bimps\b|\bimps\b.*\boutward\b/.test(l)) return true;
+  if (/\bimps\s*p2a\b|\bp2p\b.*\bdebit\b/.test(l)) return true;
+  return /\bpayment\s*to\b|\bto\s+ac(count)?\s*[\d*]/i.test(particulars);
+}
+
 function inferCreditFromParticulars(particulars: string): boolean {
   const l = particulars.toLowerCase();
+  if (inferStrongOutboundTransfer(particulars)) return false;
   if (/\b(dr\.?|debit|\/dr\/|upi\/.*\/dr\/|neft\/.*\/dr\/|imps\/.*\/dr\/)\b/.test(l)) return false;
   return (
     /\b(cr\.?|credit|salary|refund|interest|imps\/.*\/cr\/|neft\/.*\/cr\/)\b/.test(l) ||
@@ -185,8 +227,13 @@ function inferCreditFromParticulars(particulars: string): boolean {
 
 function inferDebitFromParticulars(particulars: string): boolean {
   const l = particulars.toLowerCase();
-  return /\b(dr\.?|debit|upi\/.*\/dr\/|visa pos|atm|charges?|purchase|neft\/.*\/dr\/|payment\s*[\/]\s*dr|\/dr\/)\b/.test(
-    l,
+  if (inferStrongOutboundTransfer(particulars)) return true;
+  return (
+    /\b(dr\.?|debit|upi\/.*\/dr\/|visa pos|atm|charges?|purchase|pos\s*purchase)\b/.test(l) ||
+    /\bimps\b.*\/\s*p2a\s*\/|\bp2a\b.*\bimps\b/.test(l) ||
+    /\bneft\/.*\/dr\/|payment\s*[\/]\s*dr|\/dr\/|\bimps\/.*\/dr\//.test(l) ||
+    /\bstanding\s+instruction\b|\bsi\s+debit\b/.test(l) ||
+    /\bcash\s*withdraw|self\s+cheque|chq\s*withdraw/i.test(particulars)
   );
 }
 
@@ -197,14 +244,40 @@ function refineAmountsByParticulars(
   const wv = money(assigned.withdrawal);
   const dv = money(assigned.deposit);
   const bal = assigned.balance;
+  const strongOut = inferStrongOutboundTransfer(particulars);
 
-  if (wv > 0 && dv < 0.01 && inferCreditFromParticulars(particulars) && !inferDebitFromParticulars(particulars)) {
+  /** Customer/induced outbound: amount must leave via withdrawal column */
+  if (strongOut && dv > 0.01 && wv < 0.01) {
+    return { withdrawal: Math.round(dv * 100) / 100, deposit: null, balance: bal };
+  }
+  if (strongOut && wv > 0 && dv > 0) {
+    /** Mis-split row: impose single debit bucket */
+    if (dv >= wv) return { withdrawal: Math.round(dv * 100) / 100, deposit: null, balance: bal };
+    return { withdrawal: Math.round(wv * 100) / 100, deposit: null, balance: bal };
+  }
+  if (!strongOut && wv > 0 && dv < 0.01 && inferCreditFromParticulars(particulars) && !inferDebitFromParticulars(particulars)) {
     return { withdrawal: null, deposit: Math.round(wv * 100) / 100, balance: bal };
   }
   if (dv > 0 && wv < 0.01 && inferDebitFromParticulars(particulars) && !inferCreditFromParticulars(particulars)) {
     return { withdrawal: Math.round(dv * 100) / 100, deposit: null, balance: bal };
   }
   return assigned;
+}
+
+function coerceLedgerDirectionFromBalances(
+  previousBalance: number | null,
+  assigned: { withdrawal: number | null; deposit: number | null; balance: number | null },
+): { withdrawal: number | null; deposit: number | null; balance: number | null } {
+  const bal = assigned.balance;
+  if (previousBalance == null || bal == null) return assigned;
+  const wv = money(assigned.withdrawal);
+  const dv = money(assigned.deposit);
+  /** Only reinterpret when exactly one ledger leg is nonzero */
+  if ((wv <= 0 && dv <= 0) || (wv > 0 && dv > 0)) return assigned;
+  const amt = wv > 0 ? wv : dv;
+  const fromBalance = inferSingleMovementFromBalances(previousBalance, amt, bal);
+  if (!fromBalance) return assigned;
+  return { withdrawal: fromBalance.withdrawal, deposit: fromBalance.deposit, balance: bal };
 }
 
 function looksLikeTransactionHeader(line: string): boolean {
@@ -399,6 +472,7 @@ async function extractFromPdf(
           (amountLine != null && amountLine !== ""
             ? tryAssignAmountsFromTabLine(amountLine, columnIndices)
             : null) ?? assignAmountsFromLine(parsedAmounts, particulars, columnIndices);
+        assigned = coerceLedgerDirectionFromBalances(lastBalance, assigned);
         assigned = refineAmountsByBalanceDelta(lastBalance, assigned);
         assigned = refineAmountsByParticulars(assigned, particulars);
         if (assigned.balance != null && Number.isFinite(Number(assigned.balance))) {
@@ -485,6 +559,7 @@ async function extractFromCsv(
       deposit: parseAmount(cols[4] ?? ""),
       balance: parseAmount(cols[5] ?? ""),
     };
+    assigned = coerceLedgerDirectionFromBalances(lastBalance, assigned);
     assigned = refineAmountsByBalanceDelta(lastBalance, assigned);
     assigned = refineAmountsByParticulars(assigned, particulars);
     if (assigned.balance != null && Number.isFinite(Number(assigned.balance))) {
