@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 type Row = {
   id: string;
@@ -25,6 +25,9 @@ type ScanPayload = {
   amountMin: string;
   amountMax: string;
 };
+
+type SortBy = "date" | "withdrawal" | "deposit" | "balance";
+type SortDir = "asc" | "desc";
 
 function buildRequestBody(p: ScanPayload): Record<string, unknown> {
   const body: Record<string, unknown> = { flow: p.flow };
@@ -57,6 +60,9 @@ export default function FinancialReconciliationPage() {
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [sortBy, setSortBy] = useState<SortBy>("date");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [lastMode, setLastMode] = useState<"scan" | "search">("scan");
 
   const hint = useMemo(
     () =>
@@ -65,6 +71,7 @@ export default function FinancialReconciliationPage() {
   );
 
   const runScan = useCallback(async (pageOverride?: number) => {
+    setLastMode("scan");
     const targetPage = pageOverride ?? currentPage;
     setLoading(true);
     setError(null);
@@ -76,6 +83,8 @@ export default function FinancialReconciliationPage() {
           ...buildRequestBody(form),
           page: targetPage,
           pageSize,
+          sortBy,
+          sortDir,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -86,6 +95,8 @@ export default function FinancialReconciliationPage() {
         totalMatchedRows?: unknown;
         currentPage?: unknown;
         pageSize?: unknown;
+        sortBy?: unknown;
+        sortDir?: unknown;
       };
       if (!res.ok) {
         setRows([]);
@@ -104,13 +115,19 @@ export default function FinancialReconciliationPage() {
       setTotalMatchedRows(typeof data.totalMatchedRows === "number" ? data.totalMatchedRows : null);
       setCurrentPage(typeof data.currentPage === "number" ? data.currentPage : targetPage);
       setPageSize(typeof data.pageSize === "number" ? data.pageSize : pageSize);
+      setSortBy(
+        data.sortBy === "withdrawal" || data.sortBy === "deposit" || data.sortBy === "balance" || data.sortBy === "date"
+          ? data.sortBy
+          : sortBy,
+      );
+      setSortDir(data.sortDir === "asc" || data.sortDir === "desc" ? data.sortDir : sortDir);
       setScanErrors(Array.isArray(data.errors) ? data.errors : []);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Scan failed.");
     } finally {
       setLoading(false);
     }
-  }, [currentPage, form, pageSize]);
+  }, [currentPage, form, pageSize, sortBy, sortDir]);
 
   const runExport = useCallback(async () => {
     setExporting(true);
@@ -144,6 +161,7 @@ export default function FinancialReconciliationPage() {
   }, [form]);
 
   const runSearchDb = useCallback(async (pageOverride?: number) => {
+    setLastMode("search");
     const targetPage = pageOverride ?? currentPage;
     setSearching(true);
     setError(null);
@@ -155,6 +173,8 @@ export default function FinancialReconciliationPage() {
           ...buildRequestBody(form),
           page: targetPage,
           pageSize,
+          sortBy,
+          sortDir,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -163,6 +183,8 @@ export default function FinancialReconciliationPage() {
         totalMatchedRows?: unknown;
         currentPage?: unknown;
         pageSize?: unknown;
+        sortBy?: unknown;
+        sortDir?: unknown;
       };
       if (!res.ok) {
         setError(typeof data.error === "string" ? data.error : `Search failed (HTTP ${res.status}).`);
@@ -172,6 +194,12 @@ export default function FinancialReconciliationPage() {
       setTotalMatchedRows(typeof data.totalMatchedRows === "number" ? data.totalMatchedRows : null);
       setCurrentPage(typeof data.currentPage === "number" ? data.currentPage : targetPage);
       setPageSize(typeof data.pageSize === "number" ? data.pageSize : pageSize);
+      setSortBy(
+        data.sortBy === "withdrawal" || data.sortBy === "deposit" || data.sortBy === "balance" || data.sortBy === "date"
+          ? data.sortBy
+          : sortBy,
+      );
+      setSortDir(data.sortDir === "asc" || data.sortDir === "desc" ? data.sortDir : sortDir);
       setFilesScanned(null);
       setScanErrors([]);
     } catch (e) {
@@ -179,7 +207,34 @@ export default function FinancialReconciliationPage() {
     } finally {
       setSearching(false);
     }
-  }, [currentPage, form, pageSize]);
+  }, [currentPage, form, pageSize, sortBy, sortDir]);
+
+  const toggleSort = useCallback((column: SortBy) => {
+    setCurrentPage(1);
+    setSortBy((prev) => {
+      if (prev !== column) {
+        setSortDir("desc");
+        return column;
+      }
+      setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+      return prev;
+    });
+  }, []);
+
+  const sortLabel = (column: SortBy) => {
+    if (sortBy !== column) return "";
+    return sortDir === "asc" ? " ▲" : " ▼";
+  };
+
+  useEffect(() => {
+    if (totalMatchedRows == null) return;
+    if (lastMode === "scan") {
+      void runScan(1);
+    } else {
+      void runSearchDb(1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sortBy, sortDir]);
 
   return (
     <div className="max-w-6xl space-y-6">
@@ -362,12 +417,28 @@ export default function FinancialReconciliationPage() {
                 <th className="px-3 py-2 font-medium">Stmt period</th>
                 <th className="px-3 py-2 font-medium">Page</th>
                 <th className="px-3 py-2 font-medium">Line</th>
-                <th className="px-3 py-2 font-medium">Date</th>
+                <th className="px-3 py-2 font-medium">
+                  <button type="button" onClick={() => toggleSort("date")} className="hover:text-stone-900">
+                    Date{sortLabel("date")}
+                  </button>
+                </th>
                 <th className="px-3 py-2 font-medium">Particulars</th>
                 <th className="px-3 py-2 font-medium">Chq No/Ref No</th>
-                <th className="px-3 py-2 font-medium">Withdrawal</th>
-                <th className="px-3 py-2 font-medium">Deposit</th>
-                <th className="px-3 py-2 font-medium">Balance</th>
+                <th className="px-3 py-2 font-medium">
+                  <button type="button" onClick={() => toggleSort("withdrawal")} className="hover:text-stone-900">
+                    Withdrawal{sortLabel("withdrawal")}
+                  </button>
+                </th>
+                <th className="px-3 py-2 font-medium">
+                  <button type="button" onClick={() => toggleSort("deposit")} className="hover:text-stone-900">
+                    Deposit{sortLabel("deposit")}
+                  </button>
+                </th>
+                <th className="px-3 py-2 font-medium">
+                  <button type="button" onClick={() => toggleSort("balance")} className="hover:text-stone-900">
+                    Balance{sortLabel("balance")}
+                  </button>
+                </th>
               </tr>
             </thead>
             <tbody>

@@ -7,11 +7,24 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 const TABLE = "financial_reconciliation_transactions";
+type SortBy = "date" | "withdrawal" | "deposit" | "balance";
+type SortDir = "asc" | "desc";
 
 function parsePositiveInt(value: unknown, fallback: number): number {
   const n = Number.parseInt(String(value ?? ""), 10);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
+}
+
+function parseSort(body: Record<string, unknown>): { sortBy: SortBy; sortDir: SortDir; dbColumn: string } {
+  const sortByRaw = body.sortBy;
+  const sortDirRaw = body.sortDir;
+  const sortBy: SortBy =
+    sortByRaw === "withdrawal" || sortByRaw === "deposit" || sortByRaw === "balance" ? sortByRaw : "date";
+  const sortDir: SortDir = sortDirRaw === "asc" ? "asc" : "desc";
+  const dbColumn =
+    sortBy === "date" ? "tx_date" : sortBy === "withdrawal" ? "withdrawal" : sortBy === "deposit" ? "deposit" : "balance";
+  return { sortBy, sortDir, dbColumn };
 }
 
 function parseFiltersFromBody(body: Record<string, unknown>): ReconciliationFilters {
@@ -56,6 +69,7 @@ export async function POST(request: Request) {
   const filters = parseFiltersFromBody(json);
   const page = parsePositiveInt(json.page, 1);
   const pageSize = Math.min(parsePositiveInt(json.pageSize, 100), 500);
+  const sort = parseSort(json);
 
   const serviceClient = createServiceClient(supabaseUrl, serviceRoleKey, {
     auth: { autoRefreshToken: false, persistSession: false },
@@ -66,7 +80,7 @@ export async function POST(request: Request) {
     .select(
       "id, source_file, source_page, source_line, statement_period, tx_date, particulars, chq_ref_no, withdrawal, deposit, balance, transaction_amount, flow",
     )
-    .order("tx_date", { ascending: false })
+    .order(sort.dbColumn, { ascending: sort.sortDir === "asc", nullsFirst: false })
     .order("id", { ascending: false });
   let countQuery = serviceClient.from(TABLE).select("id", { count: "exact", head: true });
 
@@ -130,5 +144,7 @@ export async function POST(request: Request) {
     totalMatchedRows: count ?? rows.length,
     currentPage: page,
     pageSize,
+    sortBy: sort.sortBy,
+    sortDir: sort.sortDir,
   });
 }
