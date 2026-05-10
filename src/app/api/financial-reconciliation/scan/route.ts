@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient as createServiceClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createHash } from "crypto";
+import { existsSync, statSync } from "fs";
 import { requireAdminSession } from "@/lib/require-admin-api";
 import { scanStatements, type ReconciliationFilters } from "@/lib/financial-reconciliation";
 
@@ -54,19 +55,18 @@ async function resetFinancialReconciliationData(
     /could not find the function|function .* does not exist|schema cache/i.test(msg);
   if (!fnMissing) return { ok: false, message: msg };
 
-  const { error: delLinks } = await client
-    .from("invoice_transaction_links")
-    .delete()
-    .lte("created_at", "2999-12-31T23:59:59Z");
+  // PostgREST rejects unqualified DELETE calls; anchor each delete on bigint PK (service role bypasses RLS).
+  const { error: delLinks } = await client.from("invoice_transaction_links").delete().gte("id", 1);
   if (delLinks) return { ok: false, message: delLinks.message };
 
   const { error: clearLines } = await client
     .from("invoice_line_items")
     .update({ source_transaction_id: null })
+    .gte("id", 1)
     .not("source_transaction_id", "is", null);
   if (clearLines) return { ok: false, message: clearLines.message };
 
-  const { error: delTx } = await client.from(TABLE).delete().gte("tx_date", "1900-01-01");
+  const { error: delTx } = await client.from(TABLE).delete().gte("id", 1);
   if (delTx) return { ok: false, message: delTx.message };
 
   return { ok: true };
@@ -97,7 +97,16 @@ export async function POST(request: Request) {
     return NextResponse.json(
       {
         error:
-          "Set BANK_STATEMENTS_ROOT, NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.local.",
+          "BANK_STATEMENTS_ROOT, NEXT_PUBLIC_SUPABASE_URL, or SUPABASE_SERVICE_ROLE_KEY is empty. Locally: copy .env.example to .env.local and fill values (do not commit). On Vercel: Project → Settings → Environment Variables with the same names (Production + Preview). The scan reads PDF/CSV files from BANK_STATEMENTS_ROOT on whichever machine runs Next.js—not from your laptop when the deployed app runs on Vercel.",
+      },
+      { status: 500 },
+    );
+  }
+
+  if (!existsSync(root) || !statSync(root).isDirectory()) {
+    return NextResponse.json(
+      {
+        error: `BANK_STATEMENTS_ROOT is not an existing folder on this server: "${root}". Deployed Vercel functions cannot see paths on your Mac/PC. Run "Scan" from a local dev server with .env.local pointing at your statement folder, or change the app to read statements from cloud storage (e.g. Supabase Storage) instead of the filesystem.`,
       },
       { status: 500 },
     );
