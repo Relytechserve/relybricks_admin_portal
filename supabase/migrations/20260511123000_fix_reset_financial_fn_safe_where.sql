@@ -11,6 +11,11 @@ begin
   update public.invoice_line_items
   set source_transaction_id = null
   where source_transaction_id is not null;
-  truncate table public.financial_reconciliation_transactions restart identity;
+  delete from public.financial_reconciliation_transactions where id is not null;
+  perform setval(
+    pg_get_serial_sequence('public.financial_reconciliation_transactions', 'id'),
+    1,
+    false
+  );
 end;
 $$;
