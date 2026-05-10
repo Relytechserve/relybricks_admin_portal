@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient as createServiceClient } from "@supabase/supabase-js";
+import { createClient as createServiceClient, type SupabaseClient } from "@supabase/supabase-js";
 import { createHash } from "crypto";
 import { requireAdminSession } from "@/lib/require-admin-api";
 import { scanStatements, type ReconciliationFilters } from "@/lib/financial-reconciliation";
@@ -36,6 +36,40 @@ function parsePositiveInt(value: unknown, fallback: number): number {
   const n = Number.parseInt(String(value ?? ""), 10);
   if (!Number.isFinite(n) || n <= 0) return fallback;
   return n;
+}
+
+/**
+ * Clears `financial_reconciliation_transactions` and dependent invoice links.
+ * Prefers DB RPC (truncate + sequence reset); falls back to deletes if the migration is not applied yet.
+ */
+async function resetFinancialReconciliationData(
+  client: SupabaseClient,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  const { error: rpcError } = await client.rpc("reset_financial_reconciliation_transactions");
+  if (!rpcError) return { ok: true };
+
+  const msg = rpcError.message ?? String(rpcError);
+  const fnMissing =
+    rpcError.code === "PGRST202" ||
+    /could not find the function|function .* does not exist|schema cache/i.test(msg);
+  if (!fnMissing) return { ok: false, message: msg };
+
+  const { error: delLinks } = await client
+    .from("invoice_transaction_links")
+    .delete()
+    .lte("created_at", "2999-12-31T23:59:59Z");
+  if (delLinks) return { ok: false, message: delLinks.message };
+
+  const { error: clearLines } = await client
+    .from("invoice_line_items")
+    .update({ source_transaction_id: null })
+    .not("source_transaction_id", "is", null);
+  if (clearLines) return { ok: false, message: clearLines.message };
+
+  const { error: delTx } = await client.from(TABLE).delete().gte("tx_date", "1900-01-01");
+  if (delTx) return { ok: false, message: delTx.message };
+
+  return { ok: true };
 }
 
 function parseSort(body: Record<string, unknown>): { sortBy: SortBy; sortDir: SortDir; dbColumn: string } {
@@ -80,25 +114,37 @@ export async function POST(request: Request) {
   const page = parsePositiveInt(json.page, 1);
   const pageSize = Math.min(parsePositiveInt(json.pageSize, 100), 500);
   const sort = parseSort(json);
+  const truncateBeforeScan = json.truncateBeforeScan === true;
+
+  const serviceClient = createServiceClient(supabaseUrl, serviceRoleKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
 
   try {
+    if (truncateBeforeScan) {
+      const reset = await resetFinancialReconciliationData(serviceClient);
+      if (!reset.ok) {
+        return NextResponse.json(
+          { error: `Failed to truncate financial reconciliation data: ${reset.message}` },
+          { status: 500 },
+        );
+      }
+    }
+
     const extracted = await scanStatements(root, { flow: "all" }, password || undefined);
-    const serviceClient = createServiceClient(supabaseUrl, serviceRoleKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
 
     const payload = extracted.rows.map((r) => {
+      /** Stable per extracted line (not withdrawal/deposit) so re-parsing can fix swapped columns via upsert. */
       const fingerprint = createHash("sha256")
         .update(
           [
             r.relativePath,
-            r.pageNumber ?? "",
+            String(r.pageNumber ?? ""),
+            String(r.lineIndex),
             r.date,
             r.particulars,
             r.chqRefNo ?? "",
-            r.withdrawal ?? "",
-            r.deposit ?? "",
-            r.balance ?? "",
+            String(r.balance ?? ""),
           ].join("|"),
         )
         .digest("hex");
@@ -248,6 +294,7 @@ export async function POST(request: Request) {
       pageSize,
       sortBy: sort.sortBy,
       sortDir: sort.sortDir,
+      truncatedBeforeScan: truncateBeforeScan,
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

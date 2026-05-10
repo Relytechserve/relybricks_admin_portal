@@ -74,6 +74,7 @@ export default function FinancialReconciliationPage() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [lastMode, setLastMode] = useState<"scan" | "search">("scan");
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [truncateBeforeScan, setTruncateBeforeScan] = useState(false);
 
   const hint = useMemo(
     () =>
@@ -81,9 +82,10 @@ export default function FinancialReconciliationPage() {
     [],
   );
 
-  const runScan = useCallback(async (pageOverride?: number) => {
+  const runScan = useCallback(async (pageOverride?: number, opts?: { allowTruncate?: boolean }) => {
     setLastMode("scan");
     const targetPage = pageOverride ?? currentPage;
+    const mayTruncate = opts?.allowTruncate === true && truncateBeforeScan && targetPage === 1;
     setLoading(true);
     setError(null);
     try {
@@ -96,6 +98,7 @@ export default function FinancialReconciliationPage() {
           pageSize,
           sortBy,
           sortDir,
+          truncateBeforeScan: mayTruncate,
         }),
       });
       const data = (await res.json().catch(() => ({}))) as {
@@ -108,6 +111,7 @@ export default function FinancialReconciliationPage() {
         pageSize?: unknown;
         sortBy?: unknown;
         sortDir?: unknown;
+        truncatedBeforeScan?: unknown;
       };
       if (!res.ok) {
         setRows([]);
@@ -134,12 +138,13 @@ export default function FinancialReconciliationPage() {
       );
       setSortDir(data.sortDir === "asc" || data.sortDir === "desc" ? data.sortDir : sortDir);
       setScanErrors(Array.isArray(data.errors) ? data.errors : []);
+      if (data.truncatedBeforeScan === true) setTruncateBeforeScan(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Scan failed.");
     } finally {
       setLoading(false);
     }
-  }, [currentPage, form, pageSize, sortBy, sortDir]);
+  }, [currentPage, form, pageSize, sortBy, sortDir, truncateBeforeScan]);
 
   const runExport = useCallback(async () => {
     setExporting(true);
@@ -242,7 +247,7 @@ export default function FinancialReconciliationPage() {
   useEffect(() => {
     if (totalMatchedRows == null) return;
     if (lastMode === "scan") {
-      void runScan(1);
+      void runScan(1, { allowTruncate: false });
     } else {
       void runSearchDb(1);
     }
@@ -387,10 +392,34 @@ export default function FinancialReconciliationPage() {
           </label>
         </div>
 
+        <label className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2 text-xs text-amber-950 max-w-xl">
+          <input
+            type="checkbox"
+            checked={truncateBeforeScan}
+            onChange={(e) => setTruncateBeforeScan(e.target.checked)}
+            className="mt-0.5"
+          />
+          <span>
+            <span className="font-semibold">Truncate reconciliation table first</span> — deletes all rows in{" "}
+            <code className="text-[11px]">financial_reconciliation_transactions</code>, clears invoice–transaction links,
+            and clears line-item links to statement rows, then re-imports from PDFs/CSVs. Use once after parser changes.
+          </span>
+        </label>
+
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"
-            onClick={() => runScan(1)}
+            onClick={() => {
+              if (
+                truncateBeforeScan &&
+                !window.confirm(
+                  "Truncate all financial reconciliation data and re-scan from files? This cannot be undone. Invoice links to statement rows will be removed.",
+                )
+              ) {
+                return;
+              }
+              void runScan(1, { allowTruncate: true });
+            }}
             disabled={loading || searching}
             className="inline-flex items-center rounded-lg bg-violet-600 px-4 py-2 text-xs font-semibold text-white shadow-sm hover:bg-violet-500 disabled:opacity-60"
           >
@@ -442,7 +471,11 @@ export default function FinancialReconciliationPage() {
         <div className="flex items-center gap-2 text-xs text-stone-700">
           <button
             type="button"
-            onClick={() => (filesScanned != null ? runScan(Math.max(1, currentPage - 1)) : runSearchDb(Math.max(1, currentPage - 1)))}
+            onClick={() =>
+              filesScanned != null
+                ? runScan(Math.max(1, currentPage - 1), { allowTruncate: false })
+                : runSearchDb(Math.max(1, currentPage - 1))
+            }
             disabled={loading || searching || currentPage <= 1}
             className="rounded border border-stone-300 bg-white px-2 py-1 disabled:opacity-50"
           >
@@ -453,7 +486,11 @@ export default function FinancialReconciliationPage() {
           </span>
           <button
             type="button"
-            onClick={() => (filesScanned != null ? runScan(currentPage + 1) : runSearchDb(currentPage + 1))}
+            onClick={() =>
+              filesScanned != null
+                ? runScan(currentPage + 1, { allowTruncate: false })
+                : runSearchDb(currentPage + 1)
+            }
             disabled={loading || searching || currentPage >= Math.ceil(totalMatchedRows / pageSize)}
             className="rounded border border-stone-300 bg-white px-2 py-1 disabled:opacity-50"
           >

@@ -1,6 +1,6 @@
 import { readdir, readFile } from "fs/promises";
 import path from "path";
-import { extractStatementPeriodFromHeader } from "@/lib/bank-statement-pdf-focus";
+import { extractStatementPeriodFromHeader, isLikelyTableHeaderLine } from "@/lib/bank-statement-pdf-focus";
 
 export type ReconciliationFilters = {
   dateFrom?: string;
@@ -124,15 +124,145 @@ function detectFlow(withdrawal: number | null, deposit: number | null): "deposit
   return "unknown";
 }
 
+function money(n: number | null | undefined): number {
+  if (n == null || !Number.isFinite(Number(n))) return 0;
+  return Number(n);
+}
+
+/**
+ * Fix wrong Withdrawal/Deposit when the PDF line order does not match [debit, credit, balance].
+ * If balance increased vs the previous row, the txn amount must be a credit (deposit); if it decreased, a debit.
+ */
+function refineAmountsByBalanceDelta(
+  previousBalance: number | null,
+  assigned: { withdrawal: number | null; deposit: number | null; balance: number | null },
+): { withdrawal: number | null; deposit: number | null; balance: number | null } {
+  const bal = assigned.balance;
+  if (previousBalance == null || bal == null || !Number.isFinite(previousBalance) || !Number.isFinite(bal)) {
+    return assigned;
+  }
+
+  const delta = Math.round((money(bal) - money(previousBalance)) * 100) / 100;
+  const tol = 1.5;
+  const wv = money(assigned.withdrawal);
+  const dv = money(assigned.deposit);
+
+  if (Math.abs(delta) < tol) return assigned;
+
+  // Balance went up → credit should carry the amount
+  if (delta > tol) {
+    if (wv > tol && dv < tol) {
+      return { withdrawal: null, deposit: wv, balance: bal };
+    }
+    return assigned;
+  }
+
+  // Balance went down → debit should carry the amount
+  if (delta < -tol) {
+    if (dv > tol && wv < tol) {
+      return { withdrawal: dv, deposit: null, balance: bal };
+    }
+    return assigned;
+  }
+
+  return assigned;
+}
+
+/**
+ * When we have no prior balance or weak delta, reduce false debits/credits from particulars.
+ * (Does not override balance-delta when that already swapped columns.)
+ */
+function inferCreditFromParticulars(particulars: string): boolean {
+  const l = particulars.toLowerCase();
+  if (/\b(dr\.?|debit|\/dr\/|upi\/.*\/dr\/|neft\/.*\/dr\/|imps\/.*\/dr\/)\b/.test(l)) return false;
+  return (
+    /\b(cr\.?|credit|salary|refund|interest|imps\/.*\/cr\/|neft\/.*\/cr\/)\b/.test(l) ||
+    /\btransferwise\b/.test(l) ||
+    /\b(neft|imps|rtgs)\b.*\b(c\/r|credit|cr)\b/i.test(l) ||
+    /\breceived from|incoming transfer|credit\s+adv/i.test(l)
+  );
+}
+
+function inferDebitFromParticulars(particulars: string): boolean {
+  const l = particulars.toLowerCase();
+  return /\b(dr\.?|debit|upi\/.*\/dr\/|visa pos|atm|charges?|purchase|neft\/.*\/dr\/|payment\s*[\/]\s*dr|\/dr\/)\b/.test(
+    l,
+  );
+}
+
+function refineAmountsByParticulars(
+  assigned: { withdrawal: number | null; deposit: number | null; balance: number | null },
+  particulars: string,
+): { withdrawal: number | null; deposit: number | null; balance: number | null } {
+  const wv = money(assigned.withdrawal);
+  const dv = money(assigned.deposit);
+  const bal = assigned.balance;
+
+  if (wv > 0 && dv < 0.01 && inferCreditFromParticulars(particulars) && !inferDebitFromParticulars(particulars)) {
+    return { withdrawal: null, deposit: Math.round(wv * 100) / 100, balance: bal };
+  }
+  if (dv > 0 && wv < 0.01 && inferDebitFromParticulars(particulars) && !inferCreditFromParticulars(particulars)) {
+    return { withdrawal: Math.round(dv * 100) / 100, deposit: null, balance: bal };
+  }
+  return assigned;
+}
+
 function looksLikeTransactionHeader(line: string): boolean {
   const l = line.toLowerCase();
   return (
     l.includes("date") &&
-    l.includes("particular") &&
+    (l.includes("particular") || l.includes("narration")) &&
     (l.includes("withdraw") || l.includes("debit")) &&
     (l.includes("deposit") || l.includes("credit")) &&
-    l.includes("balance")
+    (l.includes("balance") || l.includes("closing"))
   );
+}
+
+/** Split PDF header/table lines into coarse cells — tabs preserved by pdf-parse preferred. */
+function splitTableCells(line: string): string[] {
+  if (line.includes("\t")) {
+    return line.split("\t").map((s) => cleanCell(s));
+  }
+  return line
+    .split(/\s{2,}/)
+    .map((s) => cleanCell(s))
+    .filter((s) => s.length > 0);
+}
+
+/** 0-based column indices from a table header (when detectable). */
+export type StatementColumnIndices = {
+  withdrawal: number;
+  deposit: number;
+  balance: number;
+};
+
+function detectStatementColumnIndicesFromHeader(headerLine: string): StatementColumnIndices | null {
+  const seg = splitTableCells(headerLine).map((s) => cleanCell(s).toLowerCase());
+  if (seg.length < 3) return null;
+  let wi = -1;
+  let di = -1;
+  let bi = -1;
+  for (let i = 0; i < seg.length; i++) {
+    const t = seg[i];
+    const withdrawalLike =
+      /\bwithdrawal\b|\bwithdrawals\b|\bdebits?\b/.test(t) ||
+      /^dr\.?$|^debit$/i.test(t.trim()) ||
+      (/\bdb\b/.test(t) && !/\bdb\s*t\b/.test(t));
+    const depositLike = /\bdeposit(s)?\b|\bcredits?\b/.test(t) || /^cr\.?$|^credit$/i.test(t.trim());
+    const balanceLike = /\bbalance\b|\bclosing\b|\brunning\b/.test(t);
+    if (withdrawalLike && wi < 0) wi = i;
+    if (depositLike && di < 0) di = i;
+    if (balanceLike && bi < 0) bi = i;
+  }
+  if (wi >= 0 && di >= 0 && bi >= 0 && new Set([wi, di, bi]).size === 3) {
+    return { withdrawal: wi, deposit: di, balance: bi };
+  }
+  return null;
+}
+
+function withdrawalBeforeDepositFromIndices(layout: StatementColumnIndices | null): boolean {
+  if (!layout) return true;
+  return layout.withdrawal < layout.deposit;
 }
 
 function parseAmountsFromTail(line: string): number[] {
@@ -142,43 +272,73 @@ function parseAmountsFromTail(line: string): number[] {
     .filter((n) => Number.isFinite(n));
 }
 
+/** Single cell from a tab-aligned row — maps to Withdrawal / Deposit / Balance PDF columns when indices are known. */
+function parseMoneyCellStrict(cell: string | undefined): number | null {
+  return parseAmount(cell ?? "");
+}
+
+function tryAssignAmountsFromTabLine(
+  line: string,
+  columns: StatementColumnIndices | null,
+): { withdrawal: number | null; deposit: number | null; balance: number | null } | null {
+  if (!columns || !line.includes("\t")) return null;
+  const cells = line.split("\t");
+  const maxIdx = Math.max(columns.withdrawal, columns.deposit, columns.balance);
+  if (cells.length <= maxIdx) return null;
+  const w = parseMoneyCellStrict(cells[columns.withdrawal]);
+  const d = parseMoneyCellStrict(cells[columns.deposit]);
+  const b = parseMoneyCellStrict(cells[columns.balance]);
+  if (b == null) return null;
+  /** Row must reflect at least one ledger movement beside balance. */
+  if ((w == null || w <= 0) && (d == null || d <= 0)) return null;
+  return {
+    withdrawal: w != null && w > 0 ? w : null,
+    deposit: d != null && d > 0 ? d : null,
+    balance: b,
+  };
+}
+
 function isDateLeadingLine(line: string): boolean {
   return /^(\d{1,2}[-/][A-Za-z]{3}[-/]\d{2,4}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b/.test(
     cleanCell(line),
   );
 }
 
-function inferCreditFromParticulars(particulars: string): boolean {
-  const l = particulars.toLowerCase();
-  return /\b(cr\.?|credit|deposit|salary|refund|interest|imps\/.*\/cr\/|neft\/.*\/cr\/)\b/.test(
-    l,
-  );
-}
-
-function inferDebitFromParticulars(particulars: string): boolean {
-  const l = particulars.toLowerCase();
-  return /\b(dr\.?|debit|upi\/.*\/dr\/|visa pos|atm|charges?|payment|purchase|neft\/.*\/dr\/)\b/.test(
-    l,
-  );
-}
-
+/**
+ * Map regex-ordered money amounts to DB columns. Convention: the last value on a row is **balance**;
+ * the preceding values are debit/credit in **left-to-right PDF column order**, which we align with
+ * withdrawal/deposit using the detected header (many statements use Deposit before Withdrawal).
+ */
 function assignAmountsFromLine(
   amounts: number[],
   particulars: string,
+  columnOrder: StatementColumnIndices | null,
 ): { withdrawal: number | null; deposit: number | null; balance: number | null } {
-  if (amounts.length === 0) return { withdrawal: null, deposit: null, balance: null };
-  if (amounts.length >= 3) {
-    return { withdrawal: amounts[0], deposit: amounts[1], balance: amounts[2] };
+  const wFirst = withdrawalBeforeDepositFromIndices(columnOrder);
+  const n = amounts.length;
+  if (n === 0) return { withdrawal: null, deposit: null, balance: null };
+
+  if (n >= 2) {
+    /** Bank statements place running balance in the last column. */
+    const balance = amounts[n - 1]!;
+    const rest = amounts.slice(0, n - 1);
+    if (rest.length === 1) {
+      const amount = rest[0]!;
+      if (inferDebitFromParticulars(particulars)) return { withdrawal: amount, deposit: null, balance };
+      if (inferCreditFromParticulars(particulars)) return { withdrawal: null, deposit: amount, balance };
+      return { withdrawal: null, deposit: amount, balance };
+    }
+    // Two+ values before balance: use the first two as withdrawal/deposit (extra tokens are rare OCR noise).
+    if (rest.length >= 2) {
+      const a0 = rest[0]!;
+      const a1 = rest[1]!;
+      if (wFirst) return { withdrawal: a0, deposit: a1, balance };
+      return { withdrawal: a1, deposit: a0, balance };
+    }
   }
-  if (amounts.length === 2) {
-    const amount = amounts[0];
-    const balance = amounts[1];
-    if (inferDebitFromParticulars(particulars)) return { withdrawal: amount, deposit: null, balance };
-    if (inferCreditFromParticulars(particulars)) return { withdrawal: null, deposit: amount, balance };
-    return { withdrawal: null, deposit: amount, balance };
-  }
-  // Single amount lines are usually opening/closing balance lines.
-  return { withdrawal: null, deposit: null, balance: amounts[0] };
+
+  // Single amount: statement opening/closing or continuation line with balance only.
+  return { withdrawal: null, deposit: null, balance: amounts[0]! };
 }
 
 async function extractFromPdf(
@@ -206,6 +366,10 @@ async function extractFromPdf(
     const statementPeriod = extractStatementPeriodFromHeader(firstPageText);
     const rows: Omit<ExtractedTransactionRow, "id">[] = [];
     let rowIdx = 0;
+    /** Running ledger balance from the prior flushed row (same PDF); drives debit/credit correction. */
+    let lastBalance: number | null = null;
+    /** From table header: maps PDF withdrawal / deposit / balance columns to tab cell indices. */
+    let columnIndices: StatementColumnIndices | null = null;
 
     let tableSeen = false;
     for (const page of textResult.pages ?? []) {
@@ -222,7 +386,7 @@ async function extractFromPdf(
       let currentDate: string | null = null;
       let currentParts: string[] = [];
 
-      const flushIfPossible = (amounts?: number[]) => {
+      const flushIfPossible = (amounts?: number[], amountLine?: string) => {
         if (!currentDate || currentParts.length === 0) return;
         const particulars = currentParts.join(" ").replace(/\s+/g, " ").trim();
         if (!particulars || /brought\s+forward|carried\s+forward/i.test(particulars)) {
@@ -231,7 +395,15 @@ async function extractFromPdf(
           return;
         }
         const parsedAmounts = amounts ?? [];
-        const assigned = assignAmountsFromLine(parsedAmounts, particulars);
+        let assigned =
+          (amountLine != null && amountLine !== ""
+            ? tryAssignAmountsFromTabLine(amountLine, columnIndices)
+            : null) ?? assignAmountsFromLine(parsedAmounts, particulars, columnIndices);
+        assigned = refineAmountsByBalanceDelta(lastBalance, assigned);
+        assigned = refineAmountsByParticulars(assigned, particulars);
+        if (assigned.balance != null && Number.isFinite(Number(assigned.balance))) {
+          lastBalance = Number(assigned.balance);
+        }
         const record: Omit<ExtractedTransactionRow, "id"> = {
           relativePath,
           pageNumber: pageNum,
@@ -252,7 +424,11 @@ async function extractFromPdf(
       };
 
       for (const line of pageLines) {
-        if (looksLikeTransactionHeader(line)) continue;
+        if (looksLikeTransactionHeader(line) || isLikelyTableHeaderLine(line)) {
+          const idx = detectStatementColumnIndicesFromHeader(line);
+          if (idx) columnIndices = idx;
+          continue;
+        }
         if (/^\d+\s+of\s+\d+$/i.test(line)) continue;
         if (/^statement of customer$/i.test(line)) continue;
 
@@ -272,7 +448,7 @@ async function extractFromPdf(
         if (!currentDate) continue;
         const amounts = parseAmountsFromTail(line);
         if (amounts.length >= 2) {
-          flushIfPossible(amounts);
+          flushIfPossible(amounts, line);
         } else {
           currentParts.push(line);
         }
@@ -296,27 +472,36 @@ async function extractFromCsv(
   const rows: Omit<ExtractedTransactionRow, "id">[] = [];
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
   let rowIdx = 0;
+  let lastBalance: number | null = null;
 
   for (const line of lines) {
     const cols = line.split(",").map((c) => cleanCell(c));
     if (cols.length < 6) continue;
     const date = parseDate(cols[0]);
     if (!date) continue;
-    const withdrawal = parseAmount(cols[3] ?? "");
-    const deposit = parseAmount(cols[4] ?? "");
-    const balance = parseAmount(cols[5] ?? "");
+    const particulars = cols[1] ?? "";
+    let assigned = {
+      withdrawal: parseAmount(cols[3] ?? ""),
+      deposit: parseAmount(cols[4] ?? ""),
+      balance: parseAmount(cols[5] ?? ""),
+    };
+    assigned = refineAmountsByBalanceDelta(lastBalance, assigned);
+    assigned = refineAmountsByParticulars(assigned, particulars);
+    if (assigned.balance != null && Number.isFinite(Number(assigned.balance))) {
+      lastBalance = Number(assigned.balance);
+    }
     rows.push({
       relativePath,
       pageNumber: null,
       lineIndex: rowIdx++,
       date,
-      particulars: cols[1] ?? "",
+      particulars,
       chqRefNo: cols[2] || null,
-      withdrawal,
-      deposit,
-      balance,
-      transactionAmount: deposit ?? withdrawal,
-      flow: detectFlow(withdrawal, deposit),
+      withdrawal: assigned.withdrawal,
+      deposit: assigned.deposit,
+      balance: assigned.balance,
+      transactionAmount: assigned.deposit ?? assigned.withdrawal,
+      flow: detectFlow(assigned.withdrawal, assigned.deposit),
       statementPeriod: null,
     });
   }
