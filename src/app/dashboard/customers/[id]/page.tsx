@@ -240,6 +240,8 @@ function joinName(title: string, first: string, last: string): string {
   const [archiveReasonInput, setArchiveReasonInput] = useState("");
   const [archiving, setArchiving] = useState(false);
   const [archiveError, setArchiveError] = useState<string | null>(null);
+  /** False when DB has not applied the customer_location migration yet. */
+  const [customerLocationSupported, setCustomerLocationSupported] = useState(true);
 
    const id = params?.id;
 
@@ -264,66 +266,90 @@ function joinName(title: string, first: string, last: string): string {
          return;
        }
 
-      const { data, error } = await supabase
-         .from("customers")
-         .select(
-           [
-             "id",
-             "name",
-             "email",
-             "auth_user_id",
-             "source",
-             "segment",
-             "lifecycle_stage",
-             "phone",
-             "whatsapp",
-             "preferred_contact",
-             "status",
-             "plan_type",
-            "subscription_tier_id",
-             "next_renewal_date",
-             "renewal_status",
-             "subscription_date",
-             "package_revenue",
-             "billed_amount",
-             "outstanding_amount",
-             "contract_term_months",
-             "customer_location",
-             "property_city",
-             "property_area",
-             "property_type",
-             "property_status",
-             "property_bhk",
-             "property_furnishing",
-             "manager_name",
-             "manager_email",
-             "manager_phone",
-             "last_contacted_at",
-             "next_follow_up_at",
-             "payment_status",
-             "notes",
-            "archived_at",
-            "archived_reason",
-           ].join(", "),
-         )
-         .eq("id", id)
-         .maybeSingle();
+      const baseCustomerColumns = [
+        "id",
+        "name",
+        "email",
+        "auth_user_id",
+        "source",
+        "segment",
+        "lifecycle_stage",
+        "phone",
+        "whatsapp",
+        "preferred_contact",
+        "status",
+        "plan_type",
+        "subscription_tier_id",
+        "next_renewal_date",
+        "renewal_status",
+        "subscription_date",
+        "package_revenue",
+        "billed_amount",
+        "outstanding_amount",
+        "contract_term_months",
+        "property_city",
+        "property_area",
+        "property_type",
+        "property_status",
+        "property_bhk",
+        "property_furnishing",
+        "manager_name",
+        "manager_email",
+        "manager_phone",
+        "last_contacted_at",
+        "next_follow_up_at",
+        "payment_status",
+        "notes",
+        "archived_at",
+        "archived_reason",
+      ];
+      const optionalCustomerColumns = ["customer_location"];
 
-       if (error) {
-         setError("Failed to load customer.");
-         setLoading(false);
-         setLoadingProperties(false);
-         return;
-       }
+      let customerData: Customer | null = null;
 
-      if (!data) {
-        setError("Customer not found.");
-        setLoading(false);
-        setLoadingProperties(false);
-        return;
+      const { data: fullCustomerData, error: fullCustomerError } = await supabase
+        .from("customers")
+        .select([...baseCustomerColumns, ...optionalCustomerColumns].join(", "))
+        .eq("id", id)
+        .maybeSingle();
+
+      if (fullCustomerError) {
+        const { data: fallbackCustomerData, error: fallbackCustomerError } = await supabase
+          .from("customers")
+          .select(baseCustomerColumns.join(", "))
+          .eq("id", id)
+          .maybeSingle();
+
+        if (fallbackCustomerError) {
+          setError("Failed to load customer.");
+          setLoading(false);
+          setLoadingProperties(false);
+          return;
+        }
+
+        if (!fallbackCustomerData) {
+          setError("Customer not found.");
+          setLoading(false);
+          setLoadingProperties(false);
+          return;
+        }
+
+        customerData = {
+          ...(fallbackCustomerData as unknown as Customer),
+          customer_location: null,
+        };
+        setCustomerLocationSupported(false);
+      } else {
+        if (!fullCustomerData) {
+          setError("Customer not found.");
+          setLoading(false);
+          setLoadingProperties(false);
+          return;
+        }
+
+        customerData = fullCustomerData as unknown as Customer;
+        setCustomerLocationSupported(true);
       }
-
-      const customerData = data as unknown as Customer;
       setCustomer(customerData);
       setForm(customerData);
       const nameParts = splitName(customerData.name);
@@ -606,9 +632,7 @@ function joinName(title: string, first: string, last: string): string {
 
      const supabase = createClient();
 
-     const { error: updateError } = await supabase
-       .from("customers")
-       .update({
+     const updatePayload: Record<string, unknown> = {
         name: fullName,
          email: form.email,
          phone: form.phone,
@@ -622,7 +646,6 @@ function joinName(title: string, first: string, last: string): string {
          billed_amount: form.billed_amount,
          outstanding_amount: form.outstanding_amount,
          payment_status: form.payment_status,
-         customer_location: (form.customer_location ?? "").trim() || null,
          property_type: form.property_type,
          property_status: form.property_status,
          property_bhk: form.property_bhk,
@@ -633,7 +656,14 @@ function joinName(title: string, first: string, last: string): string {
          last_contacted_at: form.last_contacted_at,
          next_follow_up_at: form.next_follow_up_at,
          notes: form.notes,
-       })
+       };
+     if (customerLocationSupported) {
+       updatePayload.customer_location = (form.customer_location ?? "").trim() || null;
+     }
+
+     const { error: updateError } = await supabase
+       .from("customers")
+       .update(updatePayload)
        .eq("id", customer.id);
 
     if (updateError) {
