@@ -59,9 +59,10 @@
    property_type: string | null;
    property_status: string | null;
    property_sqft: number | null;
-   property_bhk: string | null;
-   property_furnishing: string | null;
-   subscription_tier_id?: string | null;
+  property_bhk: string | null;
+  property_furnishing: string | null;
+  rental_value?: number | null;
+  subscription_tier_id?: string | null;
    plan_type?: string | null;
    subscription_date?: string | null;
    next_renewal_date?: string | null;
@@ -124,6 +125,41 @@ type PropertyRenewalYearStatusRow = {
   is_paid: boolean;
   paid_source: string;
 };
+
+const BASE_CUSTOMER_PROPERTY_COLUMNS =
+  "id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing, subscription_tier_id, plan_type, subscription_date, next_renewal_date, package_revenue";
+
+const CUSTOMER_PROPERTY_COLUMNS_WITH_RENTAL = BASE_CUSTOMER_PROPERTY_COLUMNS.replace(
+  "property_furnishing, subscription_tier_id",
+  "property_furnishing, rental_value, subscription_tier_id",
+);
+
+async function loadCustomerPropertiesForCustomer(
+  supabase: ReturnType<typeof createClient>,
+  customerId: string,
+) {
+  let rentalValueSupported = true;
+  let result = await supabase
+    .from("customer_properties")
+    .select(CUSTOMER_PROPERTY_COLUMNS_WITH_RENTAL)
+    .eq("customer_id", customerId)
+    .order("created_at", { ascending: true });
+
+  if (result.error) {
+    rentalValueSupported = false;
+    result = await supabase
+      .from("customer_properties")
+      .select(BASE_CUSTOMER_PROPERTY_COLUMNS)
+      .eq("customer_id", customerId)
+      .order("created_at", { ascending: true });
+  }
+
+  const properties = ((result.data ?? []) as CustomerProperty[]).map((p) =>
+    rentalValueSupported ? p : { ...p, rental_value: null },
+  );
+
+  return { properties, rentalValueSupported, error: result.error };
+}
 
  function formatDate(value: string | null) {
    if (!value) return null;
@@ -242,6 +278,8 @@ function joinName(title: string, first: string, last: string): string {
   const [archiveError, setArchiveError] = useState<string | null>(null);
   /** False when DB has not applied the customer_location migration yet. */
   const [customerLocationSupported, setCustomerLocationSupported] = useState(true);
+  /** False when DB has not applied the rental_value migration yet. */
+  const [rentalValueSupported, setRentalValueSupported] = useState(true);
 
    const id = params?.id;
 
@@ -357,16 +395,14 @@ function joinName(title: string, first: string, last: string): string {
       setNameFirst(nameParts.first);
       setNameLast(nameParts.last);
 
-      const { data: propsData, error: propsError } = await supabase
-        .from("customer_properties")
-        .select(
-          "id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing, subscription_tier_id, plan_type, subscription_date, next_renewal_date, package_revenue",
-        )
-        .eq("customer_id", id)
-        .order("created_at", { ascending: true });
+      const {
+        properties: propsList,
+        rentalValueSupported: rentalValueColumnSupported,
+        error: propsError,
+      } = await loadCustomerPropertiesForCustomer(supabase, id);
+      setRentalValueSupported(rentalValueColumnSupported);
 
-      if (!propsError && propsData) {
-        const propsList = (propsData as unknown) as CustomerProperty[];
+      if (!propsError) {
         setProperties(propsList);
         const propIds = propsList.map((p) => p.id);
         if (propIds.length > 0) {
@@ -543,14 +579,8 @@ function joinName(title: string, first: string, last: string): string {
   async function refetchAfterTransaction() {
     if (!id) return;
     const supabase = createClient();
-    const [propsRes, custRes] = await Promise.all([
-      supabase
-        .from("customer_properties")
-        .select(
-          "id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing, subscription_tier_id, plan_type, subscription_date, next_renewal_date, package_revenue",
-        )
-        .eq("customer_id", id)
-        .order("created_at", { ascending: true }),
+    const [propsResult, custRes] = await Promise.all([
+      loadCustomerPropertiesForCustomer(supabase, id),
       supabase
         .from("customers")
         .select(
@@ -559,8 +589,9 @@ function joinName(title: string, first: string, last: string): string {
         .eq("id", id)
         .maybeSingle(),
     ]);
-    if (propsRes.data) {
-      setProperties(propsRes.data as unknown as CustomerProperty[]);
+    setRentalValueSupported(propsResult.rentalValueSupported);
+    if (!propsResult.error) {
+      setProperties(propsResult.properties);
     }
     if (custRes.data) {
       const r = custRes.data as Pick<
@@ -696,15 +727,24 @@ function joinName(title: string, first: string, last: string): string {
    async function handleAddProperty() {
      if (!id || customer?.archived_at) return;
      const supabase = createClient();
-     const { data, error } = await supabase
+     let result = await supabase
        .from("customer_properties")
        .insert({ customer_id: id })
-       .select(
-         "id, customer_id, full_address, city, area, property_type, property_status, property_sqft, property_bhk, property_furnishing, subscription_tier_id, plan_type, subscription_date, next_renewal_date, package_revenue",
-       )
+       .select(CUSTOMER_PROPERTY_COLUMNS_WITH_RENTAL)
        .single();
-     if (error) return;
-     setProperties((prev) => [...prev, data as unknown as CustomerProperty]);
+     if (result.error) {
+       result = await supabase
+         .from("customer_properties")
+         .insert({ customer_id: id })
+         .select(BASE_CUSTOMER_PROPERTY_COLUMNS)
+         .single();
+       setRentalValueSupported(false);
+     } else {
+       setRentalValueSupported(true);
+     }
+     if (result.error || !result.data) return;
+     const row = result.data as CustomerProperty;
+     setProperties((prev) => [...prev, { ...row, rental_value: row.rental_value ?? null }]);
     void logClientAdminActivity({
       action: "property.added",
       resourceType: "customer",
@@ -739,9 +779,7 @@ function joinName(title: string, first: string, last: string): string {
        return;
      }
 
-     const { error } = await supabase
-       .from("customer_properties")
-       .update({
+     const updatePayload: Record<string, unknown> = {
          full_address: prop.full_address || null,
          city: prop.city || null,
          area: prop.area || null,
@@ -755,7 +793,14 @@ function joinName(title: string, first: string, last: string): string {
          subscription_date: prop.subscription_date || null,
          next_renewal_date: prop.next_renewal_date || null,
          package_revenue: prop.package_revenue ?? null,
-       })
+       };
+     if (rentalValueSupported) {
+       updatePayload.rental_value = prop.rental_value ?? null;
+     }
+
+     const { error } = await supabase
+       .from("customer_properties")
+       .update(updatePayload)
        .eq("id", prop.id);
      setPropertySavingId(null);
      if (error) {
@@ -1628,6 +1673,29 @@ function joinName(title: string, first: string, last: string): string {
                              className="w-24 rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                            />
                          </div>
+                         {rentalValueSupported ? (
+                           <div>
+                             <label className="text-[11px] text-stone-500">Rental value (₹)</label>
+                             <input
+                               type="number"
+                               min={0}
+                               placeholder="Rental value"
+                               value={prop.rental_value ?? ""}
+                               onChange={(e) =>
+                                 updatePropertyField(
+                                   prop.id,
+                                   "rental_value",
+                                   e.target.value === "" ? null : Number(e.target.value),
+                                 )
+                               }
+                               className="mt-0.5 w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                             />
+                           </div>
+                         ) : (
+                           <p className="text-[10px] text-amber-700">
+                             Rental value will appear after the database migration is applied in Supabase.
+                           </p>
+                         )}
                          <div className="mt-3 pt-3 border-t border-stone-200 space-y-2">
                            <p className="text-xs font-medium text-stone-600">
                              Subscription (this property)
