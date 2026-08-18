@@ -139,26 +139,33 @@ async function loadCustomerPropertiesForCustomer(
   customerId: string,
 ) {
   let rentalValueSupported = true;
-  let result = await supabase
+  const withRental = await supabase
     .from("customer_properties")
     .select(CUSTOMER_PROPERTY_COLUMNS_WITH_RENTAL)
     .eq("customer_id", customerId)
     .order("created_at", { ascending: true });
 
-  if (result.error) {
+  const missingRentalColumn =
+    !!withRental.error?.message &&
+    /rental_value|schema cache/i.test(withRental.error.message);
+
+  if (missingRentalColumn) {
     rentalValueSupported = false;
-    result = await supabase
+    const fallback = await supabase
       .from("customer_properties")
       .select(BASE_CUSTOMER_PROPERTY_COLUMNS)
       .eq("customer_id", customerId)
       .order("created_at", { ascending: true });
+    const properties = ((fallback.data ?? []) as unknown as CustomerProperty[]).map((p) => ({
+      ...p,
+      rental_value: null,
+    }));
+    return { properties, rentalValueSupported, error: fallback.error };
   }
 
-  const properties = ((result.data ?? []) as CustomerProperty[]).map((p) =>
-    rentalValueSupported ? p : { ...p, rental_value: null },
-  );
+  const properties = (withRental.data ?? []) as unknown as CustomerProperty[];
 
-  return { properties, rentalValueSupported, error: result.error };
+  return { properties, rentalValueSupported, error: withRental.error };
 }
 
  function formatDate(value: string | null) {
@@ -399,7 +406,7 @@ function joinName(title: string, first: string, last: string): string {
         properties: propsList,
         rentalValueSupported: rentalValueColumnSupported,
         error: propsError,
-      } = await loadCustomerPropertiesForCustomer(supabase, id);
+      } = await loadCustomerPropertiesForCustomer(supabase, id!);
       setRentalValueSupported(rentalValueColumnSupported);
 
       if (!propsError) {
@@ -580,7 +587,7 @@ function joinName(title: string, first: string, last: string): string {
     if (!id) return;
     const supabase = createClient();
     const [propsResult, custRes] = await Promise.all([
-      loadCustomerPropertiesForCustomer(supabase, id),
+      loadCustomerPropertiesForCustomer(supabase, id!),
       supabase
         .from("customers")
         .select(
@@ -732,18 +739,21 @@ function joinName(title: string, first: string, last: string): string {
        .insert({ customer_id: id })
        .select(CUSTOMER_PROPERTY_COLUMNS_WITH_RENTAL)
        .single();
-     if (result.error) {
+     if (
+       result.error?.message &&
+       /rental_value|schema cache/i.test(result.error.message)
+     ) {
        result = await supabase
          .from("customer_properties")
          .insert({ customer_id: id })
          .select(BASE_CUSTOMER_PROPERTY_COLUMNS)
          .single();
        setRentalValueSupported(false);
-     } else {
+     } else if (!result.error) {
        setRentalValueSupported(true);
      }
      if (result.error || !result.data) return;
-     const row = result.data as CustomerProperty;
+     const row = result.data as unknown as CustomerProperty;
      setProperties((prev) => [...prev, { ...row, rental_value: row.rental_value ?? null }]);
     void logClientAdminActivity({
       action: "property.added",
@@ -1673,29 +1683,28 @@ function joinName(title: string, first: string, last: string): string {
                              className="w-24 rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-xs text-stone-900 focus:outline-none focus:ring-2 focus:ring-blue-500"
                            />
                          </div>
-                         {rentalValueSupported ? (
-                           <div>
-                             <label className="text-[11px] text-stone-500">Rental value (₹)</label>
-                             <input
-                               type="number"
-                               min={0}
-                               placeholder="Rental value"
-                               value={prop.rental_value ?? ""}
-                               onChange={(e) =>
-                                 updatePropertyField(
-                                   prop.id,
-                                   "rental_value",
-                                   e.target.value === "" ? null : Number(e.target.value),
-                                 )
-                               }
-                               className="mt-0.5 w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                             />
-                           </div>
-                         ) : (
-                           <p className="text-[10px] text-amber-700">
-                             Rental value will appear after the database migration is applied in Supabase.
-                           </p>
-                         )}
+                         <div>
+                           <label className="text-[11px] text-stone-500">Rental value (₹)</label>
+                           <input
+                             type="number"
+                             min={0}
+                             placeholder="Rental value"
+                             value={prop.rental_value ?? ""}
+                             onChange={(e) =>
+                               updatePropertyField(
+                                 prop.id,
+                                 "rental_value",
+                                 e.target.value === "" ? null : Number(e.target.value),
+                               )
+                             }
+                             className="mt-0.5 w-full rounded-lg border border-stone-300 px-2 py-1.5 text-xs text-stone-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                           />
+                           {!rentalValueSupported && (
+                             <p className="mt-1 text-[10px] text-amber-700">
+                               Saving rental value requires the Supabase migration on this environment.
+                             </p>
+                           )}
+                         </div>
                          <div className="mt-3 pt-3 border-t border-stone-200 space-y-2">
                            <p className="text-xs font-medium text-stone-600">
                              Subscription (this property)
