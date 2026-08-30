@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient as createServiceClient } from "@supabase/supabase-js";
 import ExcelJS from "exceljs";
+import { loadCustomerNotesForCustomer } from "@/lib/customer-notes";
 
 type Customer = {
   id: string;
@@ -24,15 +25,6 @@ type Customer = {
   property_type: string | null;
   property_status: string | null;
   notes: string | null;
-};
-
-type CustomerNote = {
-  id: string;
-  customer_property_id: string | null;
-  body: string;
-  is_customer_visible: boolean;
-  author_email: string | null;
-  created_at: string | null;
 };
 
 export async function GET(
@@ -149,15 +141,53 @@ export async function GET(
 
   const customer = customerData as unknown as Customer;
 
-  const { data: notesData } = await serviceClient
-    .from("customer_notes")
+  const notesResult = await loadCustomerNotesForCustomer(serviceClient, customerId);
+  const notes = notesResult.notes;
+
+  const propertyColumnsBase =
+    "id, full_address, city, area, property_type, property_status, plan_type, subscription_date, next_renewal_date, package_revenue, property_sqft, property_bhk, property_furnishing";
+  const propertyColumnsWithRental = `${propertyColumnsBase}, rental_value`;
+
+  let properties: Record<string, unknown>[] = [];
+  const propsWithRental = await serviceClient
+    .from("customer_properties")
+    .select(propertyColumnsWithRental)
+    .eq("customer_id", customerId)
+    .order("created_at", { ascending: true });
+
+  if (propsWithRental.error && /rental_value|schema cache/i.test(propsWithRental.error.message)) {
+    const fallback = await serviceClient
+      .from("customer_properties")
+      .select(propertyColumnsBase)
+      .eq("customer_id", customerId)
+      .order("created_at", { ascending: true });
+    properties = (fallback.data ?? []).map((row) => ({ ...row, rental_value: null }));
+  } else if (!propsWithRental.error) {
+    properties = propsWithRental.data ?? [];
+  }
+
+  const { data: transactions } = await serviceClient
+    .from("transactions")
     .select(
-      "id, customer_property_id, body, is_customer_visible, author_email, created_at",
+      "id, type, amount, description, date, customer_property_id, subscription_renewal_year, last_edit_reason",
     )
     .eq("customer_id", customerId)
-    .order("created_at", { ascending: false });
+    .order("date", { ascending: false });
 
-  const notes = (notesData ?? []) as unknown as CustomerNote[];
+  const propertyIds = properties.map((p) => String(p.id ?? "")).filter(Boolean);
+  let renewalStatuses: {
+    customer_property_id: string;
+    subscription_year: number;
+    is_paid: boolean;
+    paid_source: string;
+  }[] = [];
+  if (propertyIds.length > 0) {
+    const { data } = await serviceClient
+      .from("property_renewal_year_status")
+      .select("customer_property_id, subscription_year, is_paid, paid_source")
+      .in("customer_property_id", propertyIds);
+    renewalStatuses = (data ?? []) as typeof renewalStatuses;
+  }
 
   const workbook = new ExcelJS.Workbook();
 
@@ -223,6 +253,83 @@ export async function GET(
     });
   });
   notesSheet.getRow(1).font = { bold: true };
+
+  const propertiesSheet = workbook.addWorksheet("Properties");
+  propertiesSheet.columns = [
+    { header: "Property ID", key: "id", width: 26 },
+    { header: "Address", key: "full_address", width: 36 },
+    { header: "City", key: "city", width: 16 },
+    { header: "Area", key: "area", width: 16 },
+    { header: "Type", key: "property_type", width: 14 },
+    { header: "Status", key: "property_status", width: 14 },
+    { header: "Plan type", key: "plan_type", width: 14 },
+    { header: "Subscription date", key: "subscription_date", width: 16 },
+    { header: "Next renewal date", key: "next_renewal_date", width: 18 },
+    { header: "Package revenue (₹)", key: "package_revenue", width: 18 },
+    { header: "Rental value (₹)", key: "rental_value", width: 16 },
+    { header: "Sq ft", key: "property_sqft", width: 10 },
+    { header: "BHK", key: "property_bhk", width: 8 },
+    { header: "Furnishing", key: "property_furnishing", width: 14 },
+  ];
+  properties.forEach((prop) => {
+    propertiesSheet.addRow({
+      id: prop.id,
+      full_address: prop.full_address,
+      city: prop.city,
+      area: prop.area,
+      property_type: prop.property_type,
+      property_status: prop.property_status,
+      plan_type: prop.plan_type,
+      subscription_date: prop.subscription_date,
+      next_renewal_date: prop.next_renewal_date,
+      package_revenue: prop.package_revenue ?? undefined,
+      rental_value: prop.rental_value ?? undefined,
+      property_sqft: prop.property_sqft,
+      property_bhk: prop.property_bhk,
+      property_furnishing: prop.property_furnishing,
+    });
+  });
+  propertiesSheet.getRow(1).font = { bold: true };
+
+  const transactionsSheet = workbook.addWorksheet("Transactions");
+  transactionsSheet.columns = [
+    { header: "Date", key: "date", width: 14 },
+    { header: "Type", key: "type", width: 12 },
+    { header: "Amount (₹)", key: "amount", width: 14 },
+    { header: "Description", key: "description", width: 40 },
+    { header: "Property ID", key: "customer_property_id", width: 26 },
+    { header: "Subscription year", key: "subscription_renewal_year", width: 16 },
+    { header: "Last edit reason", key: "last_edit_reason", width: 30 },
+  ];
+  (transactions ?? []).forEach((tx) => {
+    transactionsSheet.addRow({
+      date: tx.date,
+      type: tx.type,
+      amount: tx.amount ?? undefined,
+      description: tx.description,
+      customer_property_id: tx.customer_property_id ?? "",
+      subscription_renewal_year: tx.subscription_renewal_year ?? "",
+      last_edit_reason: tx.last_edit_reason,
+    });
+  });
+  transactionsSheet.getRow(1).font = { bold: true };
+
+  const renewalSheet = workbook.addWorksheet("Subscription years paid");
+  renewalSheet.columns = [
+    { header: "Property ID", key: "customer_property_id", width: 26 },
+    { header: "Subscription year", key: "subscription_year", width: 16 },
+    { header: "Paid", key: "is_paid", width: 10 },
+    { header: "Source", key: "paid_source", width: 16 },
+  ];
+  (renewalStatuses ?? []).forEach((row) => {
+    renewalSheet.addRow({
+      customer_property_id: row.customer_property_id,
+      subscription_year: row.subscription_year,
+      is_paid: row.is_paid ? "Yes" : "No",
+      paid_source: row.paid_source,
+    });
+  });
+  renewalSheet.getRow(1).font = { bold: true };
 
   const buffer = await workbook.xlsx.writeBuffer();
   const safeName = customer.name.replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "") || "customer";

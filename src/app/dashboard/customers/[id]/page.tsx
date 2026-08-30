@@ -5,7 +5,13 @@
  import { useParams, useRouter } from "next/navigation";
  import { createClient } from "@/lib/supabase";
  import { logClientAdminActivity } from "@/lib/client-admin-activity";
+import {
+  insertCustomerNote,
+  loadCustomerNotesForCustomer,
+} from "@/lib/customer-notes";
  import { syncCustomerSubscriptionMirrorFromProperties } from "@/lib/sync-customer-subscription-mirror";
+import { refreshCustomerNextRenewalFromProperties } from "@/lib/customer-renewal-mirror";
+import { computeLifecycleStage } from "@/lib/lifecycle-stage";
  import { resolveTierPriceForCity } from "@/lib/subscription-tier-pricing";
  import AddPropertyTransactionForm from "./AddPropertyTransactionForm";
 
@@ -246,6 +252,9 @@ function joinName(title: string, first: string, last: string): string {
   const [newNoteCustomerVisible, setNewNoteCustomerVisible] = useState(false);
   /** `"account"` or a `customer_properties.id` while that note save is in flight */
   const [noteSavingKey, setNoteSavingKey] = useState<string | null>(null);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  /** False when DB has not applied the customer_notes.customer_property_id migration yet. */
+  const [notePropertyScopeSupported, setNotePropertyScopeSupported] = useState(true);
   const [propertyHubOpen, setPropertyHubOpen] = useState<Record<string, boolean>>({});
   const [propertyHubTab, setPropertyHubTab] = useState<Record<string, PropertyHubTab>>({});
   const [propertyNoteBody, setPropertyNoteBody] = useState<Record<string, string>>({});
@@ -471,15 +480,14 @@ function joinName(title: string, first: string, last: string): string {
         }
       }
 
-      const { data: notesData } = await supabase
-        .from("customer_notes")
-        .select(
-          "id, customer_id, customer_property_id, body, is_customer_visible, author_email, created_at",
-        )
-        .eq("customer_id", id)
-        .order("created_at", { ascending: false });
-      if (notesData) {
-        setNotes(notesData as unknown as CustomerNote[]);
+      const notesResult = await loadCustomerNotesForCustomer(supabase, id);
+      setNotePropertyScopeSupported(notesResult.propertyScopeSupported);
+      if (notesResult.error) {
+        setNoteError(notesResult.error.message ?? "Failed to load notes.");
+        setNotes([]);
+      } else {
+        setNotes(notesResult.notes as CustomerNote[]);
+        setNoteError(null);
       }
       const { data: transactionData, error: transactionLoadError } = await supabase
         .from("transactions")
@@ -636,18 +644,8 @@ function joinName(title: string, first: string, last: string): string {
     return rest as SubscriptionTierPrice;
   }
 
-  function computeLifecycleStage(value: Customer): string | null {
-    const status = value.status;
-    const paymentStatus = value.payment_status;
-    const outstanding = value.outstanding_amount ?? 0;
-
-    if (status === "Active") return "live";
-    if (status === "Prospect") return "lead";
-    if (status === "Inactive") {
-      if (paymentStatus === "overdue" || outstanding > 0) return "churn_risk";
-      return "churned";
-    }
-    return value.lifecycle_stage ?? null;
+  function computeLifecycleStageForForm(value: Customer): string | null {
+    return computeLifecycleStage(value);
   }
 
    function updateField<K extends keyof Customer>(
@@ -665,7 +663,7 @@ function joinName(title: string, first: string, last: string): string {
      setSaveError(null);
      setSaveSuccess(false);
 
-    const lifecycleStage = computeLifecycleStage(form);
+    const lifecycleStage = computeLifecycleStageForForm(form);
     const fullName = joinName(nameTitle, nameFirst, nameLast) || form.name;
 
      const supabase = createClient();
@@ -860,9 +858,33 @@ function joinName(title: string, first: string, last: string): string {
        .from("customer_properties")
        .delete()
        .eq("id", prop.id);
-     if (error) return;
+     if (error) {
+       setPropertySaveError("Failed to remove property.");
+       return;
+     }
      setProperties((prev) => prev.filter((p) => p.id !== prop.id));
     if (id) {
+      await syncCustomerSubscriptionMirrorFromProperties(supabase, id);
+      await refreshCustomerNextRenewalFromProperties(supabase, id);
+      const { data: rolled } = await supabase
+        .from("customers")
+        .select(
+          "plan_type, subscription_tier_id, next_renewal_date, subscription_date, package_revenue",
+        )
+        .eq("id", id)
+        .maybeSingle();
+      if (rolled && form) {
+        const r = rolled as Pick<
+          Customer,
+          | "plan_type"
+          | "subscription_tier_id"
+          | "next_renewal_date"
+          | "subscription_date"
+          | "package_revenue"
+        >;
+        setForm((f) => (f ? { ...f, ...r } : f));
+        setCustomer((c) => (c ? { ...c, ...r } : c));
+      }
       void logClientAdminActivity({
         action: "property.removed",
         resourceType: "customer",
@@ -999,29 +1021,34 @@ function joinName(title: string, first: string, last: string): string {
     if (!id || !body.trim() || form?.archived_at) return;
     const savingKey = customerPropertyId ?? "account";
     setNoteSavingKey(savingKey);
+    setNoteError(null);
     const supabase = createClient();
 
     const {
       data: { user },
     } = await supabase.auth.getUser();
 
-    const { data, error } = await supabase
-      .from("customer_notes")
-      .insert({
-        customer_id: id,
-        customer_property_id: customerPropertyId,
-        body: body.trim(),
-        is_customer_visible: customerVisible,
-        author_email: user?.email ?? null,
-      })
-      .select(
-        "id, customer_id, customer_property_id, body, is_customer_visible, author_email, created_at",
-      )
-      .single();
+    const result = await insertCustomerNote(supabase, {
+      customerId: id,
+      customerPropertyId,
+      body,
+      isCustomerVisible: customerVisible,
+      authorEmail: user?.email ?? null,
+      propertyScopeSupported: notePropertyScopeSupported,
+    });
 
     setNoteSavingKey(null);
-    if (error) return;
-    setNotes((prev) => [data as unknown as CustomerNote, ...prev]);
+    setNotePropertyScopeSupported(result.propertyScopeSupported);
+    if (result.error || !result.data) {
+      setNoteError(
+        result.error?.message ??
+          (customerPropertyId
+            ? "Could not save property note."
+            : "Could not save note."),
+      );
+      return;
+    }
+    setNotes((prev) => [result.data as CustomerNote, ...prev]);
     onSuccessClear?.();
     void logClientAdminActivity({
       action: "note.added",
@@ -2306,6 +2333,17 @@ function joinName(title: string, first: string, last: string): string {
                 Account-wide only (not tied to a property). Property-specific notes live under each property
                 card → Property details. Tick “Customer visible” to show in the customer portal.
               </p>
+              {!notePropertyScopeSupported && (
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Property-scoped notes require a database migration on this environment. Account-wide notes
+                  still work; use Add note below (not Save changes).
+                </p>
+              )}
+              {noteError && (
+                <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+                  {noteError}
+                </p>
+              )}
               <div className="space-y-2">
                 <textarea
                   value={newNoteBody}

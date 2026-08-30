@@ -24,7 +24,20 @@ export async function syncCustomerSubscriptionMirrorFromProperties(
     .order("created_at", { ascending: true });
 
   const rows = props ?? [];
-  if (rows.length === 0) return;
+  if (rows.length === 0) {
+    await supabase
+      .from("customers")
+      .update({
+        subscription_tier_id: null,
+        plan_type: null,
+        subscription_date: null,
+        next_renewal_date: null,
+        package_revenue: null,
+      })
+      .eq("id", customerId)
+      .is("archived_at", null);
+    return;
+  }
 
   const primary =
     rows.find((p: { subscription_tier_id: string | null }) => p.subscription_tier_id) ??

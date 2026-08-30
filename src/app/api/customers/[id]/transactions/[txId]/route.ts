@@ -2,7 +2,8 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
-import { refreshCustomerNextRenewalFromProperties } from "@/lib/customer-renewal-mirror";
+import { applyRenewalDateSideEffects } from "@/lib/customer-renewal-mirror";
+import { syncCustomerBilledAmountFromTransactions } from "@/lib/customer-billed-amount";
 import {
   recomputeAutoStatusForPropertyYear,
   upsertAutoPaidForRenewalYear,
@@ -279,33 +280,25 @@ export async function PATCH(
     await upsertAutoPaidForRenewalYear(serviceClient, propertyId, newSubscriptionRenewalYear);
   }
 
-  if (type === "renewal" && nextRenewalDate) {
-    if (propertyId) {
-      const { error: propErr } = await serviceClient
-        .from("customer_properties")
-        .update({ next_renewal_date: nextRenewalDate })
-        .eq("id", propertyId)
-        .eq("customer_id", customerId);
-      if (propErr) {
-        return NextResponse.json(
-          { error: propErr.message || "Could not update property next renewal date." },
-          { status: 400 },
-        );
-      }
-      await refreshCustomerNextRenewalFromProperties(serviceClient, customerId);
-    } else {
-      const { error: custErr } = await serviceClient
-        .from("customers")
-        .update({ next_renewal_date: nextRenewalDate })
-        .eq("id", customerId);
-      if (custErr) {
-        return NextResponse.json(
-          { error: custErr.message || "Could not update customer next renewal date." },
-          { status: 400 },
-        );
-      }
-    }
+  const shouldRecomputeRenewalDates =
+    type === "renewal" || existing?.type === "renewal";
+
+  if (shouldRecomputeRenewalDates) {
+    await applyRenewalDateSideEffects(
+      serviceClient,
+      customerId,
+      (data as { customer_property_id?: string | null }).customer_property_id ??
+        propertyId,
+    );
   }
+
+  await syncCustomerBilledAmountFromTransactions(serviceClient, customerId);
+
+  const nextRenewalDateForResponse = shouldRecomputeRenewalDates
+    ? type === "renewal"
+      ? addOneYearToIsoDate(date)
+      : null
+    : null;
 
   const { data: custRow } = await serviceClient
     .from("customers")
@@ -322,5 +315,5 @@ export async function PATCH(
     summary: `Updated ${type} transaction for ${custName}`,
   });
 
-  return NextResponse.json({ data, nextRenewalDate });
+  return NextResponse.json({ data, nextRenewalDate: nextRenewalDateForResponse });
 }

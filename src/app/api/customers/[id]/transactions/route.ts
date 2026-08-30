@@ -2,7 +2,8 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { createServerClient } from "@supabase/ssr";
 import { createClient } from "@supabase/supabase-js";
-import { refreshCustomerNextRenewalFromProperties } from "@/lib/customer-renewal-mirror";
+import { applyRenewalDateSideEffects } from "@/lib/customer-renewal-mirror";
+import { syncCustomerBilledAmountFromTransactions } from "@/lib/customer-billed-amount";
 import { upsertAutoPaidForRenewalYear } from "@/lib/property-renewal-paid-status";
 import { addOneYearToIsoDate } from "@/lib/renewal-date";
 import { subscriptionYearIndexForPayment } from "@/lib/subscription-year";
@@ -246,34 +247,10 @@ export async function POST(
     if (customerPropertyId && subscriptionRenewalYear != null) {
       await upsertAutoPaidForRenewalYear(serviceClient, customerPropertyId, subscriptionRenewalYear);
     }
-    if (customerPropertyId) {
-      const { error: propErr } = await serviceClient
-        .from("customer_properties")
-        .update({ next_renewal_date: nextRenewalDate })
-        .eq("id", customerPropertyId)
-        .eq("customer_id", customerId);
-      if (propErr) {
-        console.error("[transactions] Failed to update property next_renewal_date:", propErr);
-        return NextResponse.json(
-          { error: propErr.message || "Could not update property next renewal date." },
-          { status: 400 },
-        );
-      }
-      await refreshCustomerNextRenewalFromProperties(serviceClient, customerId);
-    } else {
-      const { error: updateError } = await serviceClient
-        .from("customers")
-        .update({ next_renewal_date: nextRenewalDate })
-        .eq("id", customerId);
-      if (updateError) {
-        console.error("[transactions] Failed to update next_renewal_date:", updateError);
-        return NextResponse.json(
-          { error: updateError.message || "Could not update customer next renewal date." },
-          { status: 400 },
-        );
-      }
-    }
+    await applyRenewalDateSideEffects(serviceClient, customerId, customerPropertyId);
   }
+
+  await syncCustomerBilledAmountFromTransactions(serviceClient, customerId);
 
   const { data: custRow } = await serviceClient
     .from("customers")

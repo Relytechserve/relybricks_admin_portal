@@ -40,10 +40,14 @@ type PropertyRow = {
   property_type: string | null;
   property_status: string | null;
   rental_value: number | null;
+  plan_type: string | null;
+  subscription_date: string | null;
+  next_renewal_date: string | null;
+  package_revenue: number | null;
 };
 
 const PROPERTY_COLUMNS_BASE =
-  "id, customer_id, full_address, city, area, property_type, property_status";
+  "id, customer_id, full_address, city, area, property_type, property_status, plan_type, subscription_date, next_renewal_date, package_revenue";
 const PROPERTY_COLUMNS_WITH_RENTAL = `${PROPERTY_COLUMNS_BASE}, rental_value`;
 
 function parseDate(value: string | null | undefined): Date | null {
@@ -230,18 +234,23 @@ export async function GET(request: Request) {
     { header: "Subscription date", key: "subscription_date", width: 16 },
     { header: "Next renewal date", key: "next_renewal_date", width: 18 },
     { header: "Renewal status", key: "renewal_status", width: 16 },
-    { header: "Package revenue (₹)", key: "package_revenue", width: 18 },
-    { header: "Billed amount (₹)", key: "billed_amount", width: 18 },
-    { header: "Outstanding amount (₹)", key: "outstanding_amount", width: 20 },
+    { header: "Customer package revenue (₹ total)", key: "package_revenue", width: 22 },
+    { header: "Customer billed amount (₹ total)", key: "billed_amount", width: 22 },
+    { header: "Customer outstanding (₹ total)", key: "outstanding_amount", width: 22 },
     { header: "Payment status", key: "payment_status", width: 16 },
     { header: "Customer location", key: "customer_location", width: 22 },
     { header: "Legacy property city", key: "property_city", width: 18 },
     { header: "Legacy property area", key: "property_area", width: 18 },
+    { header: "Property ID", key: "property_id", width: 26 },
     { header: "Property address", key: "property_address", width: 36 },
     { header: "Property city", key: "property_city_actual", width: 18 },
     { header: "Property area", key: "property_area_actual", width: 18 },
     { header: "Property type", key: "property_type", width: 16 },
     { header: "Property status", key: "property_status", width: 16 },
+    { header: "Property plan type", key: "property_plan_type", width: 16 },
+    { header: "Property subscription date", key: "property_subscription_date", width: 18 },
+    { header: "Property next renewal date", key: "property_next_renewal_date", width: 20 },
+    { header: "Property package revenue (₹)", key: "property_package_revenue", width: 20 },
     { header: "Rental value (₹)", key: "rental_value", width: 16 },
     { header: "Created at", key: "created_at", width: 20 },
     { header: "Last updated", key: "updated_at", width: 20 },
@@ -269,11 +278,16 @@ export async function GET(request: Request) {
         customer_location: customer.customer_location ?? null,
         property_city: customer.property_city,
         property_area: customer.property_area,
+        property_id: property?.id ?? null,
         property_address: property?.full_address ?? null,
         property_city_actual: property?.city ?? null,
         property_area_actual: property?.area ?? null,
         property_type: property?.property_type ?? customer.property_type,
         property_status: property?.property_status ?? customer.property_status,
+        property_plan_type: property?.plan_type ?? null,
+        property_subscription_date: property?.subscription_date ?? null,
+        property_next_renewal_date: property?.next_renewal_date ?? null,
+        property_package_revenue: property?.package_revenue ?? undefined,
         rental_value: property?.rental_value ?? undefined,
         created_at: customer.created_at,
         updated_at: customer.updated_at ?? null,
