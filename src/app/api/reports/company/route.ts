@@ -31,6 +31,21 @@ type CustomerRow = {
   updated_at?: string | null;
 };
 
+type PropertyRow = {
+  id: string;
+  customer_id: string;
+  full_address: string | null;
+  city: string | null;
+  area: string | null;
+  property_type: string | null;
+  property_status: string | null;
+  rental_value: number | null;
+};
+
+const PROPERTY_COLUMNS_BASE =
+  "id, customer_id, full_address, city, area, property_type, property_status";
+const PROPERTY_COLUMNS_WITH_RENTAL = `${PROPERTY_COLUMNS_BASE}, rental_value`;
+
 function parseDate(value: string | null | undefined): Date | null {
   if (!value) return null;
   const d = new Date(value);
@@ -175,6 +190,31 @@ export async function GET(request: Request) {
 
   const filtered = (customers ?? []).filter((c) => inRange(c.subscription_date ?? c.created_at));
 
+  let properties: PropertyRow[] = [];
+  const withRental = await serviceClient
+    .from("customer_properties")
+    .select(PROPERTY_COLUMNS_WITH_RENTAL)
+    .limit(20000);
+
+  if (withRental.error && /rental_value|schema cache/i.test(withRental.error.message)) {
+    const fallback = await serviceClient
+      .from("customer_properties")
+      .select(PROPERTY_COLUMNS_BASE)
+      .limit(20000);
+    properties = ((fallback.data ?? []) as unknown as Omit<PropertyRow, "rental_value">[]).map(
+      (row) => ({ ...row, rental_value: null }),
+    );
+  } else if (!withRental.error) {
+    properties = (withRental.data ?? []) as unknown as PropertyRow[];
+  }
+
+  const propertiesByCustomer = new Map<string, PropertyRow[]>();
+  for (const property of properties) {
+    const list = propertiesByCustomer.get(property.customer_id) ?? [];
+    list.push(property);
+    propertiesByCustomer.set(property.customer_id, list);
+  }
+
   const workbook = new ExcelJS.Workbook();
   const sheet = workbook.addWorksheet("Company insights");
 
@@ -197,38 +237,49 @@ export async function GET(request: Request) {
     { header: "Customer location", key: "customer_location", width: 22 },
     { header: "Legacy property city", key: "property_city", width: 18 },
     { header: "Legacy property area", key: "property_area", width: 18 },
+    { header: "Property address", key: "property_address", width: 36 },
+    { header: "Property city", key: "property_city_actual", width: 18 },
+    { header: "Property area", key: "property_area_actual", width: 18 },
     { header: "Property type", key: "property_type", width: 16 },
     { header: "Property status", key: "property_status", width: 16 },
+    { header: "Rental value (₹)", key: "rental_value", width: 16 },
     { header: "Created at", key: "created_at", width: 20 },
     { header: "Last updated", key: "updated_at", width: 20 },
   ];
 
-  filtered.forEach((c) => {
-    sheet.addRow({
-      id: c.id,
-      name: c.name,
-      email: c.email,
-      status: c.status,
-      lifecycle_stage: c.lifecycle_stage,
-      plan_type: c.plan_type,
-      source: c.source,
-      segment: c.segment,
-      subscription_date: c.subscription_date,
-      next_renewal_date: c.next_renewal_date,
-      renewal_status: c.renewal_status,
-      package_revenue: c.package_revenue ?? undefined,
-      billed_amount: c.billed_amount ?? undefined,
-      outstanding_amount: c.outstanding_amount ?? undefined,
-      payment_status: c.payment_status,
-      customer_location: c.customer_location ?? null,
-      property_city: c.property_city,
-      property_area: c.property_area,
-      property_type: c.property_type,
-      property_status: c.property_status,
-      created_at: c.created_at,
-      updated_at: c.updated_at ?? null,
-    });
-  });
+  for (const customer of filtered) {
+    const customerProperties = propertiesByCustomer.get(customer.id) ?? [null];
+    for (const property of customerProperties) {
+      sheet.addRow({
+        id: customer.id,
+        name: customer.name,
+        email: customer.email,
+        status: customer.status,
+        lifecycle_stage: customer.lifecycle_stage,
+        plan_type: customer.plan_type,
+        source: customer.source,
+        segment: customer.segment,
+        subscription_date: customer.subscription_date,
+        next_renewal_date: customer.next_renewal_date,
+        renewal_status: customer.renewal_status,
+        package_revenue: customer.package_revenue ?? undefined,
+        billed_amount: customer.billed_amount ?? undefined,
+        outstanding_amount: customer.outstanding_amount ?? undefined,
+        payment_status: customer.payment_status,
+        customer_location: customer.customer_location ?? null,
+        property_city: customer.property_city,
+        property_area: customer.property_area,
+        property_address: property?.full_address ?? null,
+        property_city_actual: property?.city ?? null,
+        property_area_actual: property?.area ?? null,
+        property_type: property?.property_type ?? customer.property_type,
+        property_status: property?.property_status ?? customer.property_status,
+        rental_value: property?.rental_value ?? undefined,
+        created_at: customer.created_at,
+        updated_at: customer.updated_at ?? null,
+      });
+    }
+  }
 
   sheet.getRow(1).font = { bold: true };
 

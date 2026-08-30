@@ -405,7 +405,7 @@ export default function ReportsPage() {
           <div>
             <h2 className="text-base font-semibold text-stone-900">Company-level report</h2>
             <p className="text-xs text-stone-500 mt-0.5">
-              Export the same customer insights you see on the dashboard, filtered by date.
+              Export customer insights with one row per property (including rental value), filtered by date.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -442,8 +442,9 @@ export default function ReportsPage() {
 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-xs text-stone-600 max-w-xl">
-            The export includes basic customer information, subscription and revenue fields, and key status
-            indicators for the selected period.
+            The export includes one row per property, with customer details repeated, rental value, address,
+            and subscription and revenue fields for the selected period. Customers with no properties still
+            appear once.
           </p>
           <button
             type="button"
